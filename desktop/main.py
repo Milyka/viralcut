@@ -293,7 +293,7 @@ class DesktopApi:
         return {"ok": True, "path": str(dest), "folder": str(dest.parent)}
 
     def open_url(self, url: str) -> Dict[str, Any]:
-        """Открывает внешнюю ссылку в системном браузере (Telegram-канал и т.п.)."""
+        """Открывает внешнюю ссылку в системном браузере."""
         from urllib.parse import urlparse
 
         parsed = urlparse(url or "")
@@ -341,7 +341,8 @@ def default_data_dir() -> Path:
 def free_port(start: int = 8765, attempts: int = 40) -> int:
     for port in range(start, start + attempts):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if not IS_WINDOWS:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sock.bind(("127.0.0.1", port))
                 return port
@@ -799,6 +800,14 @@ def main() -> None:
 
     def shutdown(*_args: Any) -> None:
         nonlocal pot_proc
+        try:
+            from viralcut import cpu_limit, live
+
+            for pid in list(getattr(live, "_STOP_EVENTS", {}).keys()):
+                live.stop_stream(pid)
+            cpu_limit.stop()
+        except Exception:
+            pass
         try:
             if server is not None:
                 server.should_exit = True

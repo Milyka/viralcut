@@ -126,13 +126,27 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     opts["ai_mode"] = bool(opts.get("ai_mode"))
     opts["ai_prompt"] = str(opts.get("ai_prompt") or "")[:600]
     opts["autostart"] = bool(opts.get("autostart"))
-    opts["language"] = str(opts.get("language") or "auto")
+    opts["language"] = str(opts.get("language") or "auto").strip().lower()
     if opts["language"] == "auto":
         opts["language"] = ""
     return opts
 
 
 CANCELLED: set = set()
+_MANUAL_CLIP_LOCK = threading.Lock()
+
+
+def _replace_with_retry(src: Path, dst: Path, attempts: int = 8) -> None:
+    """Атомарная замена файла с повтором при кратковременной блокировке на Windows."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(attempts):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.15 * (attempt + 1))
 
 
 def request_cancel(pid: str) -> None:
@@ -298,11 +312,13 @@ def pip_options(opts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         return None
     pos = conf.get("pos") or [0.72, 0.78]
+    raw_radius = conf.get("radius")
+    radius = 20 if raw_radius is None else max(0, min(60, int(raw_radius)))
     result = {
         "cam": {"x": cx, "y": cy, "w": cw, "h": ch} if cw >= 32 and ch >= 32 else None,
         "cam_corner": conf.get("cam_corner"),
         "cam_share": float(conf.get("cam_share") or 0.3),
-        "radius": int(conf.get("radius") or 20),
+        "radius": radius,
         "size": float(conf.get("size") or 0.28),
         "pos": [float(pos[0]), float(pos[1])],
     }
@@ -464,7 +480,7 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
     db.merge_meta(pid, {"clips": rendered})
 
 
-def prepare_project(pid: str) -> None:
+def prepare_project(pid: str, *, _skip_autostart: bool = False) -> None:
     """Скачивает видео и переводит проект в режим настройки субтитров."""
     project = db.get_project(pid)
     if not project:
@@ -495,7 +511,7 @@ def prepare_project(pid: str) -> None:
             res_txt = f"{info['height']}p"
         _update(pid, status="review", progress=100, error=None,
                 stage=f"Видео готово ({res_txt}{took_txt}) · настройте субтитры")
-        if opts.get("autostart"):
+        if opts.get("autostart") and not _skip_autostart:
             from . import jobs
 
             jobs.submit_process(pid)
@@ -556,6 +572,9 @@ def process_project(pid: str) -> None:
                 audio_track=audio_track,
             )
             stop_hb.set(); hb_thread.join(timeout=1)
+        except Cancelled:
+            stop_hb.set(); hb_thread.join(timeout=1)
+            raise
         except Exception as exc:  # noqa: BLE001
             stop_hb.set(); hb_thread.join(timeout=1)
             if info["audio_tracks"] > 1:
@@ -729,7 +748,7 @@ def _render_workers() -> int:
 
 def run_project(pid: str) -> None:
     """Полный цикл: скачать → подготовить → обработать (для ретраев/API без превью)."""
-    prepare_project(pid)
+    prepare_project(pid, _skip_autostart=True)
     project = db.get_project(pid)
     if not project or project.get("status") != "review":
         return
@@ -886,6 +905,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 offset=int(settings.get("sub_offset", 0)),
                 free_pos=settings.get("sub_free"),
                 speed=settings.get("sub_speed", "calm"),
+                aspect=settings.get("aspect", "9:16"),
             )
             ass_path = staged / f"{clip['id']}.ass"
             ass_path.write_text(text, encoding="utf-8")
@@ -907,14 +927,13 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
         except (OSError, RuntimeError) as exc:
             print(f"[render] не удалось собрать превью: {exc}", file=sys.stderr, flush=True)
 
-        encoded.replace(out_path)
+        _replace_with_retry(encoded, out_path)
         current_thumb = None
         for asset, target in ((ass_path, ass_dir / f"{clip['id']}.ass"),
                               (thumb, thumb_path), (preview, preview_path)):
             try:
                 if asset:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    asset.replace(target)
+                    _replace_with_retry(asset, target, attempts=4)
                     if target == thumb_path:
                         current_thumb = str(target)
                 else:
@@ -955,7 +974,9 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
                 "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free", "sub_speed", "cut_pauses"):
         if key in payload and payload[key] is not None:
             settings[key] = payload[key]
-    if "sub_position" in payload and "sub_free" not in payload:
+    if "sub_free" in payload and payload["sub_free"] is None:
+        settings["sub_free"] = None
+    elif "sub_position" in payload and "sub_free" not in payload:
         settings["sub_free"] = None
     start = float(payload.get("start", clip["start"]))
     end = float(payload.get("end", clip["end"]))
@@ -972,8 +993,10 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     elif clip.get("path") or "audio_track" in payload or (not words and settings.get("subtitles", True)):
         source = Path(project["source"])
         track_count = utils.probe(source)["audio_tracks"]
-        track = payload.get("audio_track", opts["audio_track"])
-        if "audio_track" in payload and track >= track_count:
+        clip_default_track = settings.get("audio_track")
+        fallback_track = int(clip_default_track) if clip_default_track is not None else opts["audio_track"]
+        track = int(payload["audio_track"]) if payload.get("audio_track") is not None else fallback_track
+        if "audio_track" in payload and payload["audio_track"] is not None and track >= track_count:
             raise ValueError("Выбранная аудиодорожка отсутствует в исходнике")
         track = track if track < track_count else 0
         opts["audio_track"] = track
@@ -1042,7 +1065,14 @@ def _slug(text: str) -> str:
 
 
 def delete_project_files(project_id: str) -> None:
-    shutil.rmtree(PROJECTS_DIR / project_id, ignore_errors=True)
+    target = PROJECTS_DIR / project_id
+    for attempt in range(5):
+        if not target.exists():
+            return
+        shutil.rmtree(target, ignore_errors=True)
+        if not target.exists():
+            return
+        time.sleep(0.2 * (attempt + 1))
 
 
 # --- ручная нарезка по таймкоду ---------------------------------------------
@@ -1111,17 +1141,18 @@ def add_manual_clip(pid: str, start: float, end: float,
     except Exception:  # noqa: BLE001
         words = []
     settings = _clip_settings(opts)
-    existing = db.list_clips(pid)
-    idx = max([int(c["idx"]) for c in existing], default=-1) + 1
-    clip = db.add_clip(pid, idx, start, end, 1.0, f"Клип {idx + 1}", "",
-                       f"Вручную {int(start // 60)}:{int(start % 60):02d}", words, settings)
+    with _MANUAL_CLIP_LOCK:
+        existing = db.list_clips(pid)
+        idx = max([int(c["idx"]) for c in existing], default=-1) + 1
+        clip = db.add_clip(pid, idx, start, end, 1.0, f"Клип {idx + 1}", "",
+                           f"Вручную {int(start // 60)}:{int(start % 60):02d}", words, settings)
+        db.merge_meta(pid, {"clips": len(existing) + 1})
     from . import jobs as _jobs
 
     # Не переводим проект в "running" — submit_rerender обновляет только статус клипа,
     # а клиентский isBusy() сам отслеживает клипы со статусом "rendering".
     if project.get("status") == "review":
         db.update_project(pid, status="done", progress=100, stage="Ручной клип", error=None)
-    db.merge_meta(pid, {"clips": len(existing) + 1})
     _jobs.submit_rerender(clip["id"], {})
     return clip
 
@@ -1215,7 +1246,7 @@ def delete_clip(cid: str) -> bool:
         Path(clip["path"]) if clip.get("path") else None,
         Path(clip["thumb"]) if clip.get("thumb") else None,
         workdir / "previews" / f"{cid}.mp4",
-        workdir / "subs" / f"{cid}.ass",
+        workdir / "ass" / f"{cid}.ass",
     ]
     for path in candidates:
         if path is None:
@@ -1370,6 +1401,8 @@ def cleanup_storage(include_sources: bool = False,
                 if item.is_file() and _is_temp_project_file(item):
                     _unlink(item)
             if include_sources and proj and proj.get("status") == "done":
+                if any(c.get("status") == "rendering" for c in db.list_clips(proj["id"])):
+                    continue
                 source_removed = False
                 for item in list(pdir.iterdir()):
                     if item.is_file() and (item.name.startswith("source.") or item.name == "preview.mp4"):

@@ -8,6 +8,21 @@ from .utils import ass_time
 
 PLAY_W, PLAY_H = 1080, 1920
 
+ASPECT_RES = {
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+    "16:9": (1920, 1080),
+    "4:5": (1080, 1350),
+}
+# Масштаб шрифта относительно вертикального эталона 9:16, чтобы субтитры
+# оставались читаемыми и пропорциональными в квадратном и горизонтальном кадре.
+ASPECT_FONT_SCALE = {
+    "9:16": 1.0,
+    "4:5": 0.90,
+    "1:1": 0.80,
+    "16:9": 0.78,
+}
+
 ACCENT_PALETTE = {
     "yellow": ("#FFE24A", "&H4AE2FF&"),
     "gold": ("#FFC53D", "&H3DC5FF&"),
@@ -158,16 +173,16 @@ SPEEDS = tuple(SPEED_PRESETS)
 
 ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
+PlayResX: {play_w}
+PlayResY: {play_h}
 WrapStyle: 2
 ScaledBorderAndShadow: yes
 YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Sub,{font_family},{sub_size},{sub_primary},{sub_secondary},&H00000000,&H78000000,0,0,0,0,100,100,1,0,1,{outline},3,2,70,70,320,1
-Style: Hook,{font_family},{hook_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H50000000,0,0,0,0,100,100,0.5,0,1,8,4,8,80,80,240,1
+Style: Sub,{font_family},{sub_size},{sub_primary},{sub_secondary},&H00000000,&H78000000,0,0,0,0,100,100,1,0,1,{outline},{shadow},2,{margin_lr},{margin_lr},{margin_v_sub},1
+Style: Hook,{font_family},{hook_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H50000000,0,0,0,0,100,100,0.5,0,1,{hook_outline},{shadow},8,{margin_lr},{margin_lr},{margin_v_hook},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -231,9 +246,10 @@ def _char_advance(font: Dict[str, Any], size: int) -> float:
     return max(0.3, float(font["avg"])) * max(20, size) * _WIDTH_FACTOR
 
 
-def _chars_per_line(font: Dict[str, Any], size: int) -> int:
+def _chars_per_line(font: Dict[str, Any], size: int, safe_width: float = _SAFE_WIDTH) -> int:
     advance = _char_advance(font, size) * _WIDTH_RESERVE
-    return max(8, min(24, int(_SAFE_WIDTH / advance)))
+    cap = 38 if safe_width >= 1400 else 24
+    return max(8, min(cap, int(safe_width / advance)))
 
 
 def _wrap(text: str, max_chars: int, max_lines: int = 2) -> List[str]:
@@ -302,23 +318,28 @@ def _merge_short_cues(cues: List[List[Dict[str, Any]]], clip_len: float,
     return merged
 
 
-def _pos_tag(position: str, offset: int, free_pos: Optional[List[float]] = None) -> str:
+def _pos_tag(position: str, offset: int, free_pos: Optional[List[float]] = None,
+             play_w: int = PLAY_W, play_h: int = PLAY_H) -> str:
     """Возвращает override-тег положения. offset > 0 — выше/дальше от края."""
     if free_pos and len(free_pos) == 2:
         try:
             fx = max(0.05, min(0.95, float(free_pos[0])))
             fy = max(0.05, min(0.95, float(free_pos[1])))
-            return f"\\an5\\pos({int(round(fx * PLAY_W))},{int(round(fy * PLAY_H))})"
+            return f"\\an5\\pos({int(round(fx * play_w))},{int(round(fy * play_h))})"
         except (TypeError, ValueError):
             pass
+    scaled_offset = int(round(offset * (play_h / 1920.0)))
+    cx = play_w // 2
     if position == "top":
-        y = max(60, 260 - offset)
-        return f"\\an8\\pos({PLAY_W // 2},{y})"
+        base_y = int(round(play_h * (260.0 / 1920.0)))
+        y = max(int(round(play_h * 0.032)), base_y - scaled_offset)
+        return f"\\an8\\pos({cx},{y})"
     if position == "middle":
-        y = max(120, min(PLAY_H - 120, 960 - offset))
-        return f"\\an5\\pos({PLAY_W // 2},{y})"
-    y = max(200, min(PLAY_H - 80, 1580 - offset))
-    return f"\\an2\\pos({PLAY_W // 2},{y})"
+        y = max(int(round(play_h * 0.08)), min(int(round(play_h * 0.92)), play_h // 2 - scaled_offset))
+        return f"\\an5\\pos({cx},{y})"
+    base_y = int(round(play_h * (1580.0 / 1920.0)))
+    y = max(int(round(play_h * 0.12)), min(int(round(play_h * 0.958)), base_y - scaled_offset))
+    return f"\\an2\\pos({cx},{y})"
 
 
 def _plain(token: str) -> str:
@@ -420,25 +441,38 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
               font: str = "montserrat",
               position: str = "bottom", offset: int = 0,
               free_pos: Optional[List[float]] = None,
-              speed: str = "calm") -> str:
+              speed: str = "calm",
+              aspect: str = "9:16") -> str:
     """Собирает ASS-файл для фрагмента. Тайминги слов абсолютные (от начала видео)."""
+    play_w, play_h = ASPECT_RES.get(aspect, (PLAY_W, PLAY_H))
+    font_scale = ASPECT_FONT_SCALE.get(aspect, 1.0)
+    safe_width = round(play_w * (940.0 / 1080.0), 1)
     accent_color = ACCENTS.get(accent, ACCENTS["yellow"])
     info = font_info(font)
-    scale = 0.700 / float(info["cap"])
-    size = max(40, min(240, int(round(sub_size * scale))))
-    hook_size_eff = max(30, int(round(hook_size * scale)))
-    chars = _chars_per_line(info, size)
+    scale = (0.700 / float(info["cap"])) * font_scale
+    size = max(36, min(240, int(round(sub_size * scale))))
+    hook_size_eff = max(28, int(round(hook_size * scale)))
+    chars = _chars_per_line(info, size, safe_width=safe_width)
     if position not in POSITIONS:
         position = "bottom"
 
     preset = SPEED_PRESETS.get(str(speed), SPEED_PRESETS["calm"])
+    outline = max(4, int(round(7 * font_scale)))
+    hook_outline = max(4, int(round(8 * font_scale)))
+    shadow = max(2, int(round(3 * font_scale)))
+    margin_lr = int(round(play_w * (70.0 / 1080.0)))
+    margin_v_sub = int(round(play_h * (320.0 / 1920.0)))
+    margin_v_hook = int(round(play_h * (240.0 / 1920.0)))
     header = ASS_HEADER.format(
+        play_w=play_w, play_h=play_h,
         font_family=info["family"], sub_size=size, hook_size=hook_size_eff,
-        outline=7, sub_primary=accent_color, sub_secondary="&H00FFFFFF&",
+        outline=outline, hook_outline=hook_outline, shadow=shadow,
+        margin_lr=margin_lr, margin_v_sub=margin_v_sub, margin_v_hook=margin_v_hook,
+        sub_primary=accent_color, sub_secondary="&H00FFFFFF&",
     )
     events: List[str] = []
     clip_len = max(0.1, clip_end - clip_start)
-    pos = _pos_tag(position, int(offset), free_pos)
+    pos = _pos_tag(position, int(offset), free_pos, play_w=play_w, play_h=play_h)
 
     local = []
     for w in words:
@@ -469,13 +503,16 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
         hook_widest = max((len(line) for line in hook_lines), default=0) * _char_advance(
             info, hook_size_eff)
         hook_shrink = 1.0
-        if hook_widest > _SAFE_WIDTH:
-            hook_shrink = max(0.6, _SAFE_WIDTH / (hook_widest * _SHRINK_RESERVE))
-        hook_size_tag = (f"\\fs{max(30, int(round(hook_size_eff * hook_shrink)))}"
+        if hook_widest > safe_width:
+            hook_shrink = max(0.6, safe_width / (hook_widest * _SHRINK_RESERVE))
+        hook_size_tag = (f"\\fs{max(28, int(round(hook_size_eff * hook_shrink)))}"
                          if hook_shrink < 0.995 else "")
         start, end = 0.15, min(clip_len - 0.1, max(1.8, min(4.2, clip_len * 0.3)))
         # если субтитры сверху — хук уводим вниз, чтобы не перекрывались
-        hook_pos = "\\an2\\pos(540,1700)" if position == "top" else "\\an8\\pos(540,240)"
+        hook_y_bottom = int(round(play_h * (1700.0 / 1920.0)))
+        hook_y_top = int(round(play_h * (240.0 / 1920.0)))
+        hook_pos = (f"\\an2\\pos({play_w // 2},{hook_y_bottom})" if position == "top"
+                    else f"\\an8\\pos({play_w // 2},{hook_y_top})")
         events.append(
             f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Hook,,0,0,0,,"
             f"{{{hook_pos}\\fad(180,220){hook_size_tag}\\fscx104\\fscy104}}"
@@ -536,9 +573,9 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
         # края, если libass подставит более широкий системный шрифт.
         longest_word = max((len(token) for token in tokens), default=0)
         shrink = 1.0
-        if width_px > _SAFE_WIDTH or longest_word > chars:
-            shrink = max(0.6, _SAFE_WIDTH / (width_px * _SHRINK_RESERVE))
-        size_tag = f"\\fs{max(40, int(round(size * shrink)))}" if shrink < 0.995 else ""
+        if width_px > safe_width or longest_word > chars:
+            shrink = max(0.6, safe_width / (width_px * _SHRINK_RESERVE))
+        size_tag = f"\\fs{max(36, int(round(size * shrink)))}" if shrink < 0.995 else ""
         fade_limit = max(0, round((cue_end - cue_start) * 200))
         tags = (f"\\fad({min(fade_in, fade_limit)},{min(fade_out, fade_limit)})"
                 f"{size_tag}"

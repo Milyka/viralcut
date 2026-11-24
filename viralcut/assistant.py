@@ -77,8 +77,8 @@ SECTIONS: List[Dict[str, Any]] = [
         "title": "Субтитры",
         "keywords": ["субтитры", "шрифт", "текст", "караоке", "размер", "цвет", "перенос"],
         "text": (
-            "Параметры: шрифт (12 стилей или свой TTF), размер, цвет акцента, позиция "
-            "(снизу, по центру, сверху), скорость появления слов, ЗАГЛАВНЫЕ.\n"
+            "Параметры: шрифт (27 встроенных стилей или свой TTF/OTF), размер, цвет акцента, позиция "
+            "(снизу, по центру, сверху или перетаскивание мышью), скорость появления слов, ЗАГЛАВНЫЕ.\n"
             "Строки переносятся с запасом по ширине, а слишком длинные реплики "
             "автоматически уменьшаются — текст не уходит за края кадра.\n"
             "В редакторе клипа можно поправить текст субтитров вручную и скачать SRT."
@@ -142,8 +142,8 @@ SECTIONS: List[Dict[str, Any]] = [
             "macOS 12+ (Apple Silicon или Intel) — отдельные сборки.\n"
             "Windows 10 1809+ или 11, x64. Нужен Microsoft Edge WebView2 Runtime "
             "(на Windows 11 есть, на Windows 10 иногда надо доустановить) и .NET "
-            "Framework 4.7.2+. Если окно не появилось — запустите ViralCut-console.bat: "
-            "он покажет ошибку, а лог лежит в %APPDATA%\\ViralCut\\app.log."
+            "Framework 4.7.2+. Если окно не появилось — откройте лог "
+            "%APPDATA%\\ViralCut\\app.log или раздел «Журнал приложения» в настройках."
         ),
     },
     {
@@ -344,7 +344,9 @@ def _run_actions(actions: List[Dict[str, Any]],
     messages: List[str] = []
     for result in results:
         ui.update(result.get("ui") or {})
-        if result.get("message"):
+        if result.get("advice"):
+            messages.append(str(result["advice"]))
+        elif result.get("message"):
             messages.append(str(result["message"]))
     return {"results": results, "ui": ui, "messages": messages}
 
@@ -355,7 +357,7 @@ def _with_actions(answer: str, actions: List[Dict[str, Any]],
     done = _run_actions(actions, context)
     text = answer.strip()
     if done["messages"]:
-        clip_task = any(action["type"] in ("rerender_clip", "undo_clip", "list_current_clips")
+        clip_task = any(action["type"] in ("rerender_clip", "undo_clip", "list_current_clips", "advice")
                         for action in actions)
         if clip_task:
             text = "\n\n".join(done["messages"])

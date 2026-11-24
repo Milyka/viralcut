@@ -618,7 +618,7 @@ function aiModeHint() {
   if (!ai.configured) {
     return "Ключ ИИ не задан — включите его в «Настройках → ИИ-помощник», иначе нарезка пойдёт обычным алгоритмом.";
   }
-  return `Модель: ${esc(ai.model || "")} (${esc(ai.provider || "")}). Моменты, хуки и подписи выберет ИИ, клипы соберутся сами.`;
+  return `Модель: ${ai.model || ""} (${ai.provider || ""}). Моменты, хуки и подписи выберет ИИ, клипы соберутся сами.`;
 }
 
 async function loadAiStatus() {
@@ -669,10 +669,27 @@ function formatSize(mb) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} ГБ` : `${mb} МБ`;
 }
 
-function closeProbe() {
+function resetModalState() {
+  clearTimeout(state.tmplTimer);
+  clearInterval(state.tmplAnim);
+  if (state.tmplResizeObserver) {
+    try { state.tmplResizeObserver.disconnect(); } catch (_) {}
+    state.tmplResizeObserver = null;
+  }
+  state.tmplTimer = null;
+  state.tmplAnim = null;
+  state.tmplPid = null;
+  state.tmplDetail = null;
+  state.tmplFreePos = null;
+  state.tmplDirty = false;
+  state.tmplReady = false;
   state.probeOpen = false;
   state.probeUrl = "";
   state.probeData = null;
+}
+
+function closeProbe() {
+  resetModalState();
   $("#modal").classList.add("hidden");
   $("#modal").innerHTML = "";
   const btn = $("#startBtn");
@@ -680,9 +697,9 @@ function closeProbe() {
 }
 
 function askQuality(url) {
+  resetModalState();
   state.probeOpen = true;
   state.probeUrl = url;
-  state.probeData = null;
   $("#modal").innerHTML = `
     <div class="modal-backdrop" data-close="probe"></div>
     <div class="modal-panel quality-panel">
@@ -746,7 +763,7 @@ function renderQuality(data) {
     <div class="quality-cards">${cards}</div>
 
     <div class="quality-note" id="qualityNote"></div>
-    <div class="modal-foot" style="padding:16px 0 0;border:0">
+    <div class="modal-foot" style="width:100%;padding:16px 0 0;border:0;background:transparent;position:static">
       <button class="btn-ghost" data-close="probe">Отмена</button>
       <button class="btn-primary" id="qualityStart">Скачать и настроить</button>
     </div>`;
@@ -792,14 +809,14 @@ async function createFromProbe(height) {
     const options = { ...heroOptions(), max_height: height, exact_quality: isYouTubeSource(url), segments: state.segmentsChoice };
     const project = await api("/api/projects", {
       method: "POST",
-      body: JSON.stringify({ url, options, prepare_only: true })
+      body: JSON.stringify({ url, options, prepare_only: !options.autostart })
     });
-    state.probeOpen = false;
+    resetModalState();
     $("#modal").classList.add("hidden");
     $("#modal").innerHTML = "";
     await loadProjects();
     openProject(project.id);
-    openTemplate(project.id);
+    if (!options.autostart) openTemplate(project.id);
   } catch (err) {
     toast(err.message, "err");
     if (btn) { btn.disabled = false; btn.textContent = "Скачать и настроить"; }
@@ -810,13 +827,14 @@ async function openLocalFile(path) {
   if (!path) return;
   toast("Открываю локальный файл…");
   try {
+    const options = heroOptions();
     const project = await api("/api/projects/local", {
       method: "POST",
-      body: JSON.stringify({ path, options: heroOptions() })
+      body: JSON.stringify({ path, options })
     });
     await loadProjects();
     openProject(project.id);
-    openTemplate(project.id);
+    if (!options.autostart) openTemplate(project.id);
   } catch (e) {
     toast(e.message || "Не удалось открыть файл", "err");
   }
@@ -830,15 +848,16 @@ async function uploadFile(file) {
     toast(`Файл больше ${maxGb} ГБ`, "err");
     return;
   }
+  const options = heroOptions();
   const form = new FormData();
   form.append("file", file);
-  form.append("options", JSON.stringify(heroOptions()));
+  form.append("options", JSON.stringify(options));
   toast("Загружаю файл…");
   try {
     const project = await api("/api/upload", { method: "POST", body: form });
     await loadProjects();
     openProject(project.id);
-    openTemplate(project.id);
+    if (!options.autostart) openTemplate(project.id);
   } catch (e) {
     toast(e.message || "Ошибка загрузки", "err");
   }
@@ -871,9 +890,11 @@ function isBusy(detail) {
 }
 
 async function loadDetail(force) {
-  if (!state.current) return;
+  const reqId = state.current;
+  if (!reqId) return;
   try {
-    const detail = await api(`/api/projects/${state.current}`);
+    const detail = await api(`/api/projects/${reqId}`);
+    if (state.current !== reqId) return;
     if (state.detail?.project.id === detail.project.id) {
       const previous = new Map(state.detail.clips.map((clip) => [clip.id, clip]));
       for (const clip of detail.clips) {
@@ -1044,7 +1065,7 @@ function clipsGridHTML() {
     const p = project.id;
     const url = `/media/${p}/clips/clip_${String(c.idx + 1).padStart(2, "0")}.mp4?v=${Math.round(c.updated_at || 0)}`;
     const preview = c.has_preview ? `/media/${p}/previews/${c.id}.mp4?v=${Math.round(c.updated_at || 0)}` : url;
-    const thumb = c.thumb ? `/media/${p}/thumbs/${c.id}.jpg` : "";
+    const thumb = c.thumb ? `/media/${p}/thumbs/${c.id}.jpg?v=${Math.round(c.updated_at || 0)}` : "";
     const aspect = c.settings?.aspect || "9:16";
     const wide = { "16:9": " wide", "1:1": " square", "4:5": " four-five" }[aspect] || "";
     const sp = c.settings?.score_parts || null;
@@ -1179,7 +1200,7 @@ function streamHomeHTML() {
           <span class="pi-title">${esc(p.title || p.url)}</span>
           <span class="pi-sub">${Math.round((p.meta.live_duration || 0) / 60)} мин записи</span>
         </span>
-        <span class="stream-item-stage">${esc(streamHint(p) || p.stage || "")}</span>
+        <span class="stream-item-stage">${esc(streamHint(p.meta) || p.stage || "")}</span>
       </button>`).join("") : `<div class="empty-clips">Записей пока нет. Вставьте ссылку на эфир.</div>`}</div>
   </section>`;
 }
@@ -1305,9 +1326,10 @@ function renderMain(force) {
   const project = state.detail.project;
   const clips = state.detail.clips;
   const running = ["queued", "running", "preparing", "processing"].includes(project.status);
-  const key = `${project.id}:${project.status}:${clips.length}:${clips.map((c) => c.status).join("")}`;
-  if (!force && running && state.mainKey === key) {
-    updateProgress(project);
+  const clipSig = clips.map((c) => `${c.id}:${c.status}:${Math.round(c.updated_at || 0)}`).join("|");
+  const key = `${project.id}:${project.status}:${clips.length}:${clipSig}`;
+  if (!force && state.mainKey === key) {
+    if (running) updateProgress(project);
     return;
   }
   state.mainKey = key;
@@ -1399,6 +1421,7 @@ $("#main").addEventListener("click", async (e) => {
     state.current = null;
     state.detail = null;
     state.mainKey = "";
+    state.homeView = "";
     history.replaceState(null, "", location.pathname);
     clearTimeout(state.pollTimer);
     renderMain(true);
@@ -1414,14 +1437,19 @@ $("#main").addEventListener("click", async (e) => {
 
   if (action === "smart-all") {
     if (!state.detail) return;
-    const ready = state.detail.clips.filter((c) => c.status === "ready" || c.status === "error");
-    if (!ready.length) return;
-    toast(`Пересобираю ${ready.length} клипов с умным кропом…`);
-    for (const clip of ready) {
-      api(`/api/clips/${clip.id}/rerender`, {
-        method: "POST",
-        body: JSON.stringify({ mode: "auto" })
-      }).catch(() => {});
+    const targets = state.detail.clips.filter(
+      (c) => (c.status === "ready" || c.status === "error") && (c.settings?.mode || "auto") !== "auto"
+    );
+    if (!targets.length) return;
+    toast(`Пересобираю ${targets.length} клипов с умным кропом…`);
+    const results = await Promise.allSettled(targets.map((clip) => api(`/api/clips/${clip.id}/rerender`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "auto" })
+    })));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    if (failed === targets.length) {
+      toast("Не удалось запустить пересборку клипов", "err");
+      return;
     }
     setTimeout(() => { loadDetail(true); schedulePoll(800); }, 700);
     return;
@@ -1576,6 +1604,12 @@ const PREVIEW_ASPECTS = {
   "1:1": [1080, 1080],
   "4:5": [1080, 1350],
 };
+const PREVIEW_FONT_SCALE = {
+  "9:16": 1.0,
+  "4:5": 0.90,
+  "1:1": 0.80,
+  "16:9": 0.78,
+};
 
 function normalizeAspect(aspect) {
   return PREVIEW_ASPECTS[aspect] ? aspect : "9:16";
@@ -1633,10 +1667,11 @@ function updateTemplatePreview() {
   const accent = state.tmplAccent || "yellow";
   const aspect = normalizeAspect(stage.dataset.aspect || state.opts.aspect || "9:16");
   const [refW, refH] = PREVIEW_ASPECTS[aspect];
+  const fontScale = PREVIEW_FONT_SCALE[aspect] || 1.0;
   const width = stage.clientWidth || (aspect === "16:9" ? 380 : 235);
   const height = stage.clientHeight || Math.round(width * (refH / refW));
-  const scale = Math.min(width / 1080, height / 1920);
-  const px = Math.max(11, Math.round(size * 0.76 * scale));
+  // Соответствует subtitles.build_ass: PlayRes совпадает с aspect, а шрифт масштабируется по refH.
+  const px = Math.max(10, Math.round(size * fontScale * 0.76 * (height / refH)));
   cap.style.fontFamily = FONT_CSS[font] || "VCMontserrat";
   cap.style.fontSize = px + "px";
   cap.style.textTransform = upper ? "uppercase" : "none";
@@ -1667,7 +1702,8 @@ function updateTemplatePreview() {
       cap.style.transform = "translateY(-50%)";
     } else {
       cap.style.top = "auto";
-      cap.style.bottom = `calc(${17.7 + offsetPct}%)`;
+      // В 16:9 поднимаем нижнюю подпись чуть выше полосы управления <video>, чтобы они не перекрывались.
+      cap.style.bottom = aspect === "16:9" ? `max(44px, calc(${17.7 + offsetPct}%))` : `calc(${17.7 + offsetPct}%)`;
       cap.style.transform = "";
     }
     if (resetBtn) resetBtn.hidden = true;
@@ -1709,13 +1745,7 @@ function applyPreset(key) {
 }
 
 function closeTemplate(keepProject) {
-  clearTimeout(state.tmplTimer);
-  clearInterval(state.tmplAnim);
-  state.tmplTimer = null;
-  state.tmplAnim = null;
-  state.tmplPid = null;
-  state.tmplDetail = null;
-  state.tmplFreePos = null;
+  resetModalState();
   $("#modal").classList.add("hidden");
   $("#modal").innerHTML = "";
   if (!keepProject) renderSidebar();
@@ -1723,13 +1753,9 @@ function closeTemplate(keepProject) {
 
 function openTemplate(pid) {
   if (state.tmplPid === pid) return;
-  clearTimeout(state.tmplTimer);
+  resetModalState();
   state.tmplPid = pid;
-  state.tmplDetail = null;
-  state.tmplFreePos = null;
-  clearInterval(state.tmplAnim);
   state.tmplAccent = "yellow";
-  state.tmplReady = false;
 
   const listedProject = state.projects.find((p) => p.id === pid);
   const initAspect = normalizeAspect(
@@ -1831,7 +1857,8 @@ function openTemplate(pid) {
   $("#modal").classList.remove("hidden");
   updateTemplatePreview();
 
-  $("#tpFont").addEventListener("change", updateTemplatePreview);
+  const markDirty = () => { state.tmplDirty = true; };
+  $("#tpFont").addEventListener("change", () => { markDirty(); updateTemplatePreview(); });
   const tpFontAdd = $("#tpFontAdd");
   if (tpFontAdd) tpFontAdd.addEventListener("click", () => {
     state.fontTarget = "#tpFont";
@@ -1840,20 +1867,29 @@ function openTemplate(pid) {
   $("#tpSpeed").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-val]");
     if (!btn) return;
+    markDirty();
     $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b === btn));
     startCaptionPreview();
   });
-  $("#tpSize").addEventListener("input", updateTemplatePreview);
-  $("#tpPos").addEventListener("change", () => { state.tmplFreePos = null; updateTemplatePreview(); });
-  $("#tpOffset").addEventListener("input", () => { state.tmplFreePos = null; updateTemplatePreview(); });
-  $("#tpFreeReset")?.addEventListener("click", () => { state.tmplFreePos = null; updateTemplatePreview(); });
+  $("#tpSize").addEventListener("input", () => { markDirty(); updateTemplatePreview(); });
+  $("#tpPos").addEventListener("change", () => { markDirty(); state.tmplFreePos = null; updateTemplatePreview(); });
+  $("#tpOffset").addEventListener("input", () => { markDirty(); state.tmplFreePos = null; updateTemplatePreview(); });
+  $("#tpFreeReset")?.addEventListener("click", () => { markDirty(); state.tmplFreePos = null; updateTemplatePreview(); });
+  $("#tpHook")?.addEventListener("change", markDirty);
   const tmplCap = $("#tmplCaption");
   const tmplStage = $("#tmplStage");
+  if (tmplStage && typeof ResizeObserver !== "undefined") {
+    state.tmplResizeObserver = new ResizeObserver(() => {
+      if (state.tmplPid === pid) updateTemplatePreview();
+    });
+    state.tmplResizeObserver.observe(tmplStage);
+  }
   if (tmplCap && tmplStage) {
     let dragging = false;
     const moveTo = (ev) => {
       const rect = tmplStage.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
+      markDirty();
       const fx = Math.max(0.12, Math.min(0.88, (ev.clientX - rect.left) / rect.width));
       const fy = Math.max(0.08, Math.min(0.92, (ev.clientY - rect.top) / rect.height));
       state.tmplFreePos = [Number(fx.toFixed(4)), Number(fy.toFixed(4))];
@@ -1876,15 +1912,17 @@ function openTemplate(pid) {
     tmplCap.addEventListener("pointerup", stopDrag);
     tmplCap.addEventListener("pointercancel", stopDrag);
   }
-  $("#tpUpper").addEventListener("change", updateTemplatePreview);
+  $("#tpUpper").addEventListener("change", () => { markDirty(); updateTemplatePreview(); });
   $("#tpAccents").addEventListener("click", (e) => {
     const b = e.target.closest(".swatch");
     if (!b) return;
+    markDirty();
     state.tmplAccent = b.dataset.val;
     $$("#tpAccents .swatch").forEach((x) => x.classList.toggle("active", x === b));
     updateTemplatePreview();
   });
   $$(".preset-chip", $("#modal")).forEach((btn) => btn.addEventListener("click", () => {
+    markDirty();
     $$(".preset-chip", $("#modal")).forEach((b) => b.classList.toggle("active", b === btn));
     applyPreset(btn.dataset.preset);
   }));
@@ -1917,24 +1955,38 @@ async function tmplPoll() {
       veil.innerHTML = `<div class="tmpl-error">${esc(project.error || "Не удалось загрузить видео")}</div>
         <button class="btn-ghost" id="tmplRetry">Повторить загрузку</button>`;
       $("#tmplRetry").addEventListener("click", async () => {
-        await api(`/api/projects/${project.id}/retry`, { method: "POST", body: JSON.stringify({ force_hd: false, prepare_only: true }) });
-        openTemplate(project.id);
+        const retryBtn = $("#tmplRetry");
+        if (retryBtn) { retryBtn.disabled = true; retryBtn.textContent = "Повторяю…"; }
+        try {
+          await api(`/api/projects/${project.id}/retry`, {
+            method: "POST",
+            body: JSON.stringify({ force_hd: false, prepare_only: true })
+          });
+          state.tmplPid = null;
+          openTemplate(project.id);
+        } catch (err) {
+          toast(err.message, "err");
+          if (retryBtn) { retryBtn.disabled = false; retryBtn.textContent = "Повторить загрузку"; }
+        }
       });
       return;
     }
     if (project.status === "review") {
       const defaults = templateDefaults(project);
       applyPreviewAspect($("#tmplStage"), $("#tpAspectBadge"), defaults.aspect);
-      $("#tpFont").value = defaults.font;
-      $("#tpSize").value = defaults.size;
-      $("#tpPos").value = defaults.pos;
-      $("#tpOffset").value = defaults.offset;
-      $("#tpUpper").checked = defaults.uppercase;
-      $("#tpHook").checked = defaults.showHook;
-      $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.speed));
-      state.tmplAccent = defaults.accent;
-      state.tmplFreePos = defaults.freePos;
-      $$("#tpAccents .swatch").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.accent));
+      if (!state.tmplDirty && !state.tmplReady) {
+        $("#tpFont").value = defaults.font;
+        $("#tpSize").value = defaults.size;
+        $("#tpPos").value = defaults.pos;
+        $("#tpOffset").value = defaults.offset;
+        $("#tpUpper").checked = defaults.uppercase;
+        $("#tpHook").checked = defaults.showHook;
+        $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.speed));
+        state.tmplAccent = defaults.accent;
+        state.tmplFreePos = defaults.freePos;
+        $$("#tpAccents .swatch").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.accent));
+      }
+      state.tmplReady = true;
       updateTemplatePreview();
 
       const video = $("#tmplVideo");
@@ -1953,9 +2005,10 @@ async function tmplPoll() {
       ].filter(Boolean).join(" · ");
       return;
     }
-    if (project.status === "done") {
+    if (["running", "processing", "done", "cancelled"].includes(project.status)) {
       closeTemplate(true);
       openProject(project.id);
+      if (["running", "processing"].includes(project.status)) schedulePoll(500);
     }
   } catch (err) {
     state.tmplTimer = setTimeout(tmplPoll, 1500);
@@ -1993,33 +2046,29 @@ function clipUrl(clip) {
   return `/media/${p}/clips/clip_${String(clip.idx + 1).padStart(2, "0")}.mp4?v=${Math.round(clip.updated_at || 0)}`;
 }
 
-async function loadAudioTracks(pid) {
+async function loadAudioTracks(pid, clipTrack) {
   const sel = $("#edAudio");
   if (!sel) return;
   try {
     const data = await api(`/api/projects/${pid}/audio`);
     const tracks = data.tracks || [];
     if (tracks.length < 2) { sel.closest(".field").style.display = "none"; return; }
+    const activeTrack = Number.isInteger(clipTrack) ? clipTrack : (data.selected || 0);
     sel.innerHTML = tracks.map((t, i) => {
-      const lang = (t.language && t.language !== "und") ? t.language.toUpperCase() : "—";
-      const title = t.title ? ` · ${t.title}` : "";
-      return `<option value="${i}" ${i === (data.selected || 0) ? "selected" : ""}>${i + 1}. ${lang}${title}</option>`;
+      const lang = (t.language && t.language !== "und") ? esc(String(t.language).toUpperCase()) : "—";
+      const title = t.title ? ` · ${esc(String(t.title))}` : "";
+      return `<option value="${i}" ${i === activeTrack ? "selected" : ""}>${i + 1}. ${lang}${title}</option>`;
     }).join("");
-    sel.addEventListener("change", async () => {
-      try {
-        await api(`/api/projects/${pid}/audio`, { method: "POST", body: JSON.stringify({ index: Number(sel.value) }) });
-        toast("Звуковая дорожка выбрана — подействует при следующем рендере");
-      } catch (e) { toast(e.message, "err"); }
-    });
   } catch (e) { console.error(e); }
 }
 
 function openEditor(clipId) {
   const clip = state.detail.clips.find((c) => c.id === clipId);
   if (!clip) return;
+  resetModalState();
   const project = state.detail.project;
   const liveDur = (project.meta && project.meta.live_duration) || 0;
-  const maxT = Math.max(1, (project.duration || liveDur || clip.end) - 0.2);
+  const maxT = Math.max(1, Math.max(project.duration || liveDur || clip.end, clip.end));
   const s = clip.settings || {};
   const accent = s.accent || "yellow";
   const fontKey = s.sub_font || "montserrat";
@@ -2027,6 +2076,7 @@ function openEditor(clipId) {
   const fontPos = s.sub_position || "bottom";
   const fontOffset = Number(s.sub_offset || 0);
   const subSpeed = s.sub_speed || "calm";
+  const clipMode = s.mode || "auto";
   const clipAspect = normalizeAspect(s.aspect || (project.options && project.options.aspect) || "9:16");
 
   $("#modal").innerHTML = `
@@ -2079,7 +2129,7 @@ function openEditor(clipId) {
               <div class="field">
                 <label for="edAspect">Формат</label>
                 <select id="edAspect">
-                  ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<option value="${a}" ${(s.aspect || "9:16") === a ? "selected" : ""}>${a}</option>`).join("")}
+                  ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<option value="${a}" ${clipAspect === a ? "selected" : ""}>${a}</option>`).join("")}
                 </select>
               </div>
               <div class="field">
@@ -2090,9 +2140,9 @@ function openEditor(clipId) {
             <div class="field">
               <label for="edMode">Кадрирование</label>
               <select id="edMode">
-                <option value="auto" ${s.mode === "auto" ? "selected" : ""}>Умный кроп (по лицу)</option>
-                <option value="blur" ${s.mode === "blur" || !s.mode ? "selected" : ""}>Размытый фон</option>
-                <option value="crop" ${s.mode === "crop" ? "selected" : ""}>По центру</option>
+                <option value="auto" ${clipMode === "auto" ? "selected" : ""}>Умный кроп (по лицу)</option>
+                <option value="blur" ${clipMode === "blur" ? "selected" : ""}>Размытый фон</option>
+                <option value="crop" ${clipMode === "crop" ? "selected" : ""}>По центру</option>
               </select>
             </div>
           </section>
@@ -2162,9 +2212,12 @@ function openEditor(clipId) {
     </div>`;
 
   $("#modal").classList.remove("hidden");
-  loadAudioTracks(project.id);
+  loadAudioTracks(project.id, Number.isInteger(s.audio_track) ? s.audio_track : undefined);
 
   let chosenAccent = accent;
+  let posChanged = false;
+  $("#edPos").addEventListener("change", () => { posChanged = true; });
+  $("#edOffset").addEventListener("input", () => { posChanged = true; });
   const syncEditorSample = () => {
     const sample = $("#edFontSample");
     if (!sample) return;
@@ -2244,6 +2297,7 @@ function openEditor(clipId) {
       sub_size: Number($("#edSize").value),
       sub_position: $("#edPos").value,
       sub_offset: Number($("#edOffset").value),
+      sub_free: (!posChanged && Array.isArray(s.sub_free) && s.sub_free.length >= 2) ? s.sub_free : undefined,
       sub_speed: ($("#edSpeed .active") || {}).dataset?.val || "calm"
     };
     try {
@@ -2274,6 +2328,7 @@ function openEditor(clipId) {
       sub_size: Number($("#edSize").value),
       sub_position: $("#edPos").value,
       sub_offset: Number($("#edOffset").value),
+      sub_free: (!posChanged && Array.isArray(s.sub_free) && s.sub_free.length >= 2) ? s.sub_free : undefined,
       sub_speed: ($("#edSpeed .active") || {}).dataset?.val || "calm"
     };
     try {
@@ -2293,6 +2348,7 @@ function openEditor(clipId) {
 }
 
 function closeModal() {
+  resetModalState();
   $("#modal").classList.add("hidden");
   $("#modal").innerHTML = "";
 }
@@ -2348,9 +2404,11 @@ $("#newBtn").addEventListener("click", () => {
 $("#streamBtn")?.addEventListener("click", () => {
   state.current = null;
   state.detail = null;
+  state.mainKey = "";
   state.homeView = "streams";
   clearTimeout(state.pollTimer);
   history.replaceState(null, "", location.pathname);
+  renderSidebar();
   renderMain(true);
 });
 
@@ -2420,23 +2478,29 @@ async function checkUpdates() {
   } catch (_) { /* офлайн — просто не показываем */ }
 }
 
+function normVersion(ver) {
+  return String(ver || "").replace(/^[^\d]*/, "").trim();
+}
+
 function renderUpdate(data) {
   const card = $("#updateCard");
   if (!card) return;
-  const dismissed = localStorage.getItem("vcUpdateDismissed");
-  if (!data || !data.available || !data.latest || dismissed === data.latest) {
+  const latestNorm = normVersion(data && data.latest);
+  const dismissed = normVersion(localStorage.getItem("vcUpdateDismissed"));
+  if (!data || !data.available || !latestNorm || dismissed === latestNorm) {
     card.hidden = true;
     return;
   }
   const url = data.url || "https://github.com/Milyka/viralcut/releases/latest";
   card.href = url;
   card.setAttribute("data-external", url);
+  card.dataset.version = latestNorm;
   $("#updateTitle").textContent = `Доступна версия ${data.latest}`;
   const note = String(data.notes || "").split("\n").map((l) => l.replace(/^#+\s*/, "").trim()).find(Boolean);
   $("#updateSub").textContent = note ? note.slice(0, 70) : "Скачать с GitHub";
   card.hidden = false;
-  if (localStorage.getItem("vcUpdateSeen") !== data.latest) {
-    localStorage.setItem("vcUpdateSeen", data.latest);
+  if (normVersion(localStorage.getItem("vcUpdateSeen")) !== latestNorm) {
+    localStorage.setItem("vcUpdateSeen", latestNorm);
     toast(`Вышла новая версия ${data.latest} — скачать на GitHub`);
   }
 }
@@ -2648,8 +2712,10 @@ async function loadAiModels(selected, force) {
   }
   if (hint) hint.textContent = "Загружаю список моделей…";
   try {
-    const query = `?provider=${encodeURIComponent(provider)}${force ? "&force=true" : ""}`;
-    const data = await api(`/api/ai/models${query}`);
+    const params = new URLSearchParams({ provider });
+    if (force) params.set("force", "true");
+    if (baseVal) params.set("base_url", baseVal);
+    const data = await api(`/api/ai/models?${params.toString()}`);
     if (!isCurrent()) return;
     const models = (data.models || []).slice(0, 500);
     if (!models.length) throw new Error("пусто");
@@ -2904,6 +2970,8 @@ async function applyAssistantUI(data) {
     if (ui.prompt) state.opts.aiPrompt = String(ui.prompt);
     const toggle = $("#aiModeToggle");
     if (toggle) toggle.checked = state.opts.aiMode;
+    const promptInput = $("#aiPrompt");
+    if (promptInput && ui.prompt) promptInput.value = state.opts.aiPrompt;
     const card = $("#aiModeCard");
     if (card) card.classList.toggle("on", state.opts.aiMode);
   }
@@ -2937,6 +3005,7 @@ function closeAssistant() {
 }
 
 async function openSettings() {
+  resetModalState();
   let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true,
                hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto",
                ai_provider: "deepseek", ai_model: "", ai_key_set: false, ai: null,
@@ -3208,6 +3277,10 @@ async function openSettings() {
         if (select) {
           select.innerHTML = found.models.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
         }
+        const pHint = $("#setAiProviderHint");
+        if (pHint) pHint.textContent = aiProviderHint("local", conf.ai);
+        const mHint = $("#setAiModelHint");
+        if (mHint) mHint.textContent = `Найдено локальных моделей: ${found.models.length}.`;
       } else {
         info.textContent = "Локальный сервер не отвечает: запустите Ollama (11434) или LM Studio (1234).";
       }
@@ -3366,7 +3439,14 @@ function bindHud() {
     toggleHud();
   };
   const toggleHud = () => {
-    setCollapsed(!card.classList.contains("collapsed"));
+    const nextCollapsed = !card.classList.contains("collapsed");
+    setCollapsed(nextCollapsed);
+    if (!nextCollapsed && card.parentElement === document.body) {
+      requestAnimationFrame(() => {
+        const r = card.getBoundingClientRect();
+        placeHud(r.left, r.top);
+      });
+    }
     try {
       localStorage.setItem("vcHudCollapsed", card.classList.contains("collapsed") ? "1" : "0");
     } catch (_) {}
@@ -3470,7 +3550,7 @@ async function initPip(detail) {
     cam: conf.cam || null,
     cam_corner: conf.cam_corner || "bottom-right",
     size: conf.size || 0.28,
-    radius: conf.radius || 20,
+    radius: conf.radius != null ? conf.radius : 20,
   };
 
   function updatePipBox() {
@@ -3493,7 +3573,7 @@ async function initPip(detail) {
     box.style.height = `${share}%`;
   }
 
-  async function savePip() {
+  async function savePip(showErr) {
     try {
       const payload = {
         enabled: conf.enabled,
@@ -3507,7 +3587,12 @@ async function initPip(detail) {
         method: "POST",
         body: JSON.stringify(payload),
       });
-    } catch (e) { console.error("pip save", e); }
+      return true;
+    } catch (e) {
+      console.error("pip save", e);
+      if (showErr) toast(e.message || "Не удалось сохранить настройки окна", "err");
+      return false;
+    }
   }
 
   updatePipBox();
@@ -3563,9 +3648,11 @@ async function initPip(detail) {
   });
   $("#pipSize").addEventListener("change", savePip);
 
-  $("#pipApply").addEventListener("click", async () => { await savePip(); toast("Окно сохранено"); });
+  $("#pipApply").addEventListener("click", async () => {
+    if (await savePip(true)) toast("Окно сохранено");
+  });
   $("#pipRebuild").addEventListener("click", async () => {
-    await savePip();
+    if (!(await savePip(true))) return;
     try {
       const res = await api(`/api/projects/${project.id}/pip/apply`, { method: "POST", body: JSON.stringify({}) });
       toast(`Пересобираю клипов: ${res.clips}`);

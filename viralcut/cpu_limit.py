@@ -77,13 +77,26 @@ def cores_for(percent: Optional[int] = None) -> int:
 # Windows: Job Object с жёстким потолком
 # --------------------------------------------------------------------------- #
 
-class _JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(ctypes.Structure):
+class _JOBOBJECT_CPU_RATE_MIN_MAX(ctypes.Structure):
     _fields_ = [
-        ("ControlFlags", ctypes.c_uint32),
+        ("MinRate", ctypes.c_uint16),
+        ("MaxRate", ctypes.c_uint16),
+    ]
+
+
+class _JOBOBJECT_CPU_RATE_UNION(ctypes.Union):
+    _fields_ = [
         ("CpuRate", ctypes.c_uint32),
         ("Weight", ctypes.c_uint32),
-        ("MinRate", ctypes.c_uint32),
-        ("MaxRate", ctypes.c_uint32),
+        ("MinMax", _JOBOBJECT_CPU_RATE_MIN_MAX),
+    ]
+
+
+class _JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(ctypes.Structure):
+    _anonymous_ = ("u",)
+    _fields_ = [
+        ("ControlFlags", ctypes.c_uint32),
+        ("u", _JOBOBJECT_CPU_RATE_UNION),
     ]
 
 
@@ -102,6 +115,8 @@ def _windows_kernel32():
     kernel32.SetInformationJobObject.restype = wt.BOOL
     kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
     kernel32.AssignProcessToJobObject.restype = wt.BOOL
+    kernel32.CloseHandle.argtypes = [wt.HANDLE]
+    kernel32.CloseHandle.restype = wt.BOOL
     kernel32.GetCurrentProcess.argtypes = []
     kernel32.GetCurrentProcess.restype = wt.HANDLE
     return kernel32
@@ -115,22 +130,27 @@ def _windows_apply(percent: int) -> bool:
         return False
     try:
         created = False
-        if not _state.get("job"):
+        job = _state.get("job")
+        if not job:
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
                 return False
-            _state["job"] = job
             created = True
         info = _JOBOBJECT_CPU_RATE_CONTROL_INFORMATION()
         info.ControlFlags = _CPU_RATE_CONTROL_ENABLE | _CPU_RATE_CONTROL_HARD_CAP
         # CpuRate — в сотых долях процента
         info.CpuRate = max(1, min(10000, percent * 100))
         ok = kernel32.SetInformationJobObject(
-            _state["job"], _JOB_CPU_RATE_CONTROL, ctypes.byref(info), ctypes.sizeof(info))
+            job, _JOB_CPU_RATE_CONTROL, ctypes.byref(info), ctypes.sizeof(info))
         if not ok:
+            if created:
+                kernel32.CloseHandle(job)
             return False
         if created:
-            kernel32.AssignProcessToJobObject(_state["job"], kernel32.GetCurrentProcess())
+            if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+                kernel32.CloseHandle(job)
+                return False
+            _state["job"] = job
         return True
     except Exception:  # noqa: BLE001
         return False

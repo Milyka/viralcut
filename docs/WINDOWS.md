@@ -2,7 +2,7 @@
 
 ## Скачать и запустить
 
-1. Скачайте `ViralCut-1.6.4-windows-x64.zip` из раздела **Releases** на GitHub.
+1. Скачайте `ViralCut-1.6.5-windows-x64.zip` из раздела **Releases** на GitHub.
 2. Распакуйте архив целиком в любую папку, например `C:\ViralCut`.
 3. Запустите `ViralCut.exe`.
 

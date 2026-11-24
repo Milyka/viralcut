@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -52,34 +53,58 @@ def payload() -> List[Dict[str, Any]]:
              "has_cyrillic": bool(f.get("has_cyrillic", True))} for f in list_custom()]
 
 
+_SYNC_LOCK = threading.Lock()
+
+
+def _same_file(src: Path, dst: Path) -> bool:
+    try:
+        if not dst.exists() or dst.is_symlink():
+            return False
+        s1, s2 = src.stat(), dst.stat()
+        return s1.st_size == s2.st_size and abs(s1.st_mtime - s2.st_mtime) < 2.0
+    except OSError:
+        return False
+
+
 def sync() -> Path:
-    """Собирает папку со всеми шрифтами (симлинки) для libass."""
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    expected: Dict[str, Path] = {}
-    for path in sorted(FONTS_DIR.glob("*.ttf")):
-        expected[path.name] = path
-    for font in list_custom():
-        expected[font["file"]] = CUSTOM_DIR / font["file"]
-    for existing in RUNTIME_DIR.iterdir():
-        if existing.name not in expected:
+    """Собирает папку со всеми шрифтами (симлинки или копии) для libass потокобезопасно."""
+    with _SYNC_LOCK:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        expected: Dict[str, Path] = {}
+        for path in sorted(FONTS_DIR.glob("*.ttf")):
+            expected[path.name] = path
+        for font in list_custom():
+            src_custom = CUSTOM_DIR / font["file"]
+            if src_custom.exists():
+                expected[font["file"]] = src_custom
+        for existing in RUNTIME_DIR.iterdir():
+            if existing.name not in expected:
+                try:
+                    existing.unlink()
+                except OSError:
+                    pass
+        for name, src in expected.items():
+            link = RUNTIME_DIR / name
             try:
-                existing.unlink()
+                if link.is_symlink() and Path(os.readlink(link)) == src:
+                    continue
+                if _same_file(src, link):
+                    continue
+                if link.exists() or link.is_symlink():
+                    link.unlink()
             except OSError:
-                pass
-    for name, src in expected.items():
-        link = RUNTIME_DIR / name
-        try:
-            if link.is_symlink() and Path(os.readlink(link)) == src:
-                continue
-            if link.exists() or link.is_symlink():
-                link.unlink()
-        except OSError:
-            pass
-        try:
-            link.symlink_to(src)
-        except OSError:
-            shutil.copy2(src, link)
-    return RUNTIME_DIR
+                # На Windows файл может быть открыт параллельным ffmpeg — если размер совпал, оставляем.
+                if _same_file(src, link):
+                    continue
+            try:
+                link.symlink_to(src)
+            except OSError:
+                try:
+                    shutil.copy2(src, link)
+                except OSError:
+                    if not link.exists():
+                        raise
+        return RUNTIME_DIR
 
 
 def libass_dir() -> Path:

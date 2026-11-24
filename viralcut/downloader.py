@@ -561,19 +561,19 @@ def _pick_format(info: Dict[str, Any], max_height: int,
     videos = [f for f in formats if (f.get("vcodec") or "none") != "none" and f.get("height")]
     if not videos:
         return (FORMAT_HD if max_height > 360 else FORMAT_SD), 0
-    fitting = [f for f in videos if int(f.get("height") or 0) <= max_height] or videos
+    fitting = [f for f in videos if (_resolution(f) or int(f.get("height") or 0)) <= max_height] or videos
 
     def rank(f: Dict[str, Any]) -> tuple:
         codec = f.get("vcodec") or ""
         return (
-            int(f.get("height") or 0),
+            _resolution(f) or int(f.get("height") or 0),
             1 if codec.startswith("avc1") else 0,
             1 if f.get("ext") == "mp4" else 0,
             1 if (f.get("acodec") or "none") != "none" else 0,
         )
 
     video = max(fitting, key=rank)
-    height = int(video.get("height") or 0)
+    height = _resolution(video) or int(video.get("height") or 0)
     audios = [f for f in formats
               if (f.get("vcodec") or "none") == "none" and (f.get("acodec") or "none") != "none"]
     if (video.get("acodec") or "none") != "none":
@@ -972,7 +972,7 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
 
     # Предлагаем только те ступени, которые источник реально отдаёт: иначе для
     # ролика 240p интерфейс обещал 1080p и подставлял размер 240p.
-    video_heights = [int(f["height"]) for f in formats
+    video_heights = [_resolution(f) or int(f["height"]) for f in formats
                      if f.get("height") and (f.get("vcodec") or "none") != "none"]
     max_available = max(video_heights) if video_heights else 0
     youtube = is_youtube(url)
@@ -982,7 +982,8 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
     options = []
     for height in steps:
         vids = [f for f in formats if (f.get("vcodec") or "none") != "none" and
-                (_resolution(f) == height if youtube else f.get("height") and int(f["height"]) <= height)]
+                (_resolution(f) == height if youtube
+                 else (_resolution(f) or int(f.get("height") or 0)) <= height)]
         if not vids:
             if youtube:
                 options.append({"height": height, "size_mb": None, "confirmed": False})
@@ -1325,6 +1326,8 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.extract_info(url, download=True)
+        except Cancelled:
+            raise
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             continue
@@ -1337,11 +1340,13 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
             info = _probe_dims(got)
         except Exception:  # noqa: BLE001
             info = {}
-        height_now = int(info.get("height") or 0)
+        height_now = min(int(info.get("width") or 0), int(info.get("height") or 0)) or int(info.get("height") or 0)
         if height_now and height_now < min_ok and label.startswith("HD") and fi + 1 < len(attempts):
             print(f"[section] {label}: пришло {height_now}p, пробую другой клиент",
                   file=sys.stderr, flush=True)
             _clean_partials(dest_dir)
+            for old in dest_dir.glob("section.*"):
+                old.unlink(missing_ok=True)
             continue
         if quality is not None:
             quality["height"] = height_now

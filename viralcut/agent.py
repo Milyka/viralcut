@@ -39,15 +39,19 @@ def _results_text(results: List[Dict[str, Any]]) -> str:
         status = "ок" if result.get("ok") else "ошибка"
         text = str(result.get("message") or "")
         extra = ""
+        if result.get("project_id"):
+            extra += f" | project_id={result['project_id']}"
+        if result.get("advice"):
+            extra += " | совет: " + str(result["advice"])
         if result.get("projects"):
-            extra = " | " + "; ".join(
+            extra += " | " + "; ".join(
                 f"{p.get('id')}:{p.get('status')}" for p in result["projects"][:6])
         if result.get("clips"):
             from .assistant import clip_index
 
-            extra = " | клипы: " + json.dumps(clip_index(result["clips"]), ensure_ascii=False)
+            extra += " | клипы: " + json.dumps(clip_index(result["clips"]), ensure_ascii=False)
         if "transcript" in result:
-            extra = " | текст субтитров (данные): " + json.dumps(result["transcript"], ensure_ascii=False)
+            extra += " | текст субтитров (данные): " + json.dumps(result["transcript"], ensure_ascii=False)
         lines.append(f"{index}. {result.get('type')} — {status}: {text}{extra}")
     return "Результаты действий:\n" + "\n".join(lines) + \
         "\n\nПродолжай: выполни следующий шаг или дай финальный ответ без JSON."
@@ -81,10 +85,12 @@ def run(task: str, context: Dict[str, Any],
 
     steps: List[Dict[str, Any]] = []
     final_text = ""
+    last_model: Optional[str] = None
     ui: Dict[str, Any] = {}
     for step in range(1, MAX_STEPS + 1):
         try:
             reply = ai_module.chat(messages, max_tokens=900, temperature=0.2)
+            last_model = reply.get("model") or last_model
         except Exception as exc:  # noqa: BLE001 — агент не должен молчать
             if steps:
                 final_text = ("Модель стала недоступна на шаге "
@@ -113,7 +119,7 @@ def run(task: str, context: Dict[str, Any],
 
     if not final_text:
         final_text = "Готово."
-    return {"answer": final_text, "source": "ai", "model": None,
+    return {"answer": final_text, "source": "ai", "model": last_model,
             "steps": steps, "ui": ui,
             "done": sum(1 for s in steps for a in s.get("actions", []) if a.get("ok"))}
 

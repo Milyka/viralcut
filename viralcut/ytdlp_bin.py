@@ -143,9 +143,23 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
         cmd += ["--download-sections", f"*{max(0.0, start):.1f}-{max(0.0, end):.1f}"]
         cmd += ["--force-keyframes-at-cuts"]
     cmd.append(url)
+    import threading
+
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            errors="replace", bufsize=1, **_spawn())
+                            encoding="utf-8", errors="replace", bufsize=1, **_spawn())
     tail: List[str] = []
+    timed_out = threading.Event()
+
+    def _kill_on_timeout() -> None:
+        timed_out.set()
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    watchdog = threading.Timer(timeout, _kill_on_timeout)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -157,19 +171,29 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
             match = re.search(r"(\d{1,3}(?:\.\d+)?)%", line)
             if match and progress:
                 progress(min(0.98, float(match.group(1)) / 100.0), f"Скачивание {match.group(1)}%")
-        code = proc.wait(timeout=timeout)
+        code = proc.wait(timeout=30)
     finally:
+        watchdog.cancel()
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except Exception:  # noqa: BLE001
+                pass
         try:
-            proc.kill()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
         except Exception:  # noqa: BLE001
             pass
+    if timed_out.is_set():
+        raise RuntimeError(f"yt-dlp превысил лимит времени ({int(timeout)} с)")
     if code != 0:
         raise RuntimeError((tail[-1] if tail else "yt-dlp завершился с ошибкой")[-300:])
-    files = sorted(dest_dir.glob("source.*"))
-    media = [f for f in files if f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".m4a")]
-    if not media:
+    files = [f for f in dest_dir.glob("source.*") if f.suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".m4a")]
+    if not files:
         raise RuntimeError("файл не появился")
-    result = media[0]
+    video_exts = {".mp4", ".mkv", ".webm", ".mov"}
+    result = max(files, key=lambda f: (1 if f.suffix.lower() in video_exts else 0, f.stat().st_mtime, f.stat().st_size))
     return {"path": result, "title": url, "duration": None, "uploader": None,
             "webpage_url": url, "extractor": "yt-dlp-bin", "quality": "bin",
             "height": None, "selected_format": "bin"}
@@ -186,7 +210,8 @@ def info(url: str, browser: Optional[str] = None,
         cmd += ["--extractor-args", "youtube:player_client=" + ",".join(clients)]
     cmd += _cookie_args(browser)
     cmd.append(url)
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **_spawn())
+    out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                         errors="replace", timeout=timeout, **_spawn())
     if out.returncode != 0:
         raise RuntimeError((out.stderr or "не удалось получить метаданные")[-300:])
     try:

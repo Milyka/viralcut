@@ -37,7 +37,9 @@ def run(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedPr
 
 
 _TIME_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
-_AUDIO_STREAM_RE = re.compile(r"Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([a-z]{2,3})\))?: Audio: ([^,]+)")
+_AUDIO_STREAM_RE = re.compile(
+    r"Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([A-Za-z0-9_-]{2,15})\))?: Audio: ([^,]+)"
+)
 
 
 def _to_seconds(h: str, m: str, s: str) -> float:
@@ -48,7 +50,10 @@ def probe(path: Path) -> Dict[str, Any]:
     """Достаёт длительность, размеры, fps и наличие звука из вывода ffmpeg."""
     proc = run([ffmpeg(), "-hide_banner", "-i", str(path)])
     text = proc.stderr or ""
-    info: Dict[str, Any] = {"duration": 0.0, "width": 0, "height": 0, "fps": 30.0, "has_audio": False}
+    info: Dict[str, Any] = {
+        "duration": 0.0, "width": 0, "height": 0, "fps": 30.0,
+        "has_audio": False, "has_video": False,
+    }
     m = _TIME_RE.search(text)
     if m:
         info["duration"] = _to_seconds(*m.groups())
@@ -56,21 +61,22 @@ def probe(path: Path) -> Dict[str, Any]:
     vm = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", text)
     if vm:
         info["width"], info["height"] = int(vm.group(1)), int(vm.group(2))
+        info["has_video"] = info["width"] > 0 and info["height"] > 0
     fm = re.search(r"(\d+(?:\.\d+)?)\s+fps", text)
     if fm:
         info["fps"] = float(fm.group(1))
     info["has_audio"] = "Audio:" in text
     info["audio_tracks"] = len(_AUDIO_STREAM_RE.findall(text))
 
-    # Поворот из метаданных (вертикальные видео с телефона)
+    # Поворот из метаданных (вертикальные видео с телефона: ±90° и ±270°)
     rm = re.search(r"rotation of (-?\d+(?:\.\d+)?) degrees", text)
-    if rm:
+    if rm and info["has_video"]:
         angle = abs(float(rm.group(1))) % 360
-        if 75 <= angle <= 105:
+        if (75 <= angle <= 105) or (255 <= angle <= 285):
             info["width"], info["height"] = info["height"], info["width"]
-            info["rotation"] = 90
-    if info["width"] == 0 or info["height"] == 0:
-        raise MediaError("Не удалось прочитать видеофайл (повреждён или это не видео).")
+            info["rotation"] = 90 if angle <= 105 else 270
+    if not info["has_video"] and not (info["has_audio"] and info["duration"] > 0):
+        raise MediaError("Не удалось прочитать медиафайл (повреждён или неподдерживаемый формат).")
     return info
 
 
@@ -82,8 +88,9 @@ def audio_tracks(path: Path) -> List[Dict[str, Any]]:
     except Exception:  # noqa: BLE001
         return []
     tracks: List[Dict[str, Any]] = []
+    lines = text.splitlines()
     order = 0
-    for line in text.splitlines():
+    for idx, line in enumerate(lines):
         m = _AUDIO_STREAM_RE.search(line)
         if not m:
             continue
@@ -91,13 +98,28 @@ def audio_tracks(path: Path) -> List[Dict[str, Any]]:
         mt = re.search(r"\(title: ([^)]+)\)", line)
         if mt:
             title = mt.group(1).strip()
-        channels, stereo = 0, 1 if "stereo" in line else 2
-        mch = re.search(r"(\d+(?:\.\d+)?) (?:ch|stereo|mono)", line)
-        if mch:
-            channels = float(mch.group(1))
+        else:
+            # FFmpeg печатает метаданные дорожки на следующих строках (Metadata: / title : ...)
+            for follow in lines[idx + 1: idx + 8]:
+                if re.match(r"^\s*Stream #", follow):
+                    break
+                mt2 = re.match(r"^\s*title\s*:\s*(.+)$", follow, re.I)
+                if mt2:
+                    title = mt2.group(1).strip()
+                    break
+        channels: Any = 2
+        if re.search(r"\bmono\b", line, re.I):
+            channels = 1
+        elif re.search(r"\bstereo\b", line, re.I):
+            channels = 2
+        else:
+            mch = re.search(r",\s*(\d+(?:\.\d+)?)\s*(?:ch|channels|\()", line, re.I)
+            if mch:
+                val = float(mch.group(1))
+                channels = int(val) if val.is_integer() else val
         tracks.append({"index": order, "stream": int(m.group(1)),
                        "language": (m.group(2) or "").lower(),
-                       "title": title, "channels": channels or 2})
+                       "title": title, "channels": channels})
         order += 1
     return tracks
 
@@ -235,11 +257,13 @@ def ass_time(seconds: float) -> str:
 
 
 def parse_vtt(path: Path) -> List[Dict[str, Any]]:
-    """Простой парсер WebVTT в сегменты с приблизительными таймингами слов."""
+    """Парсер WebVTT (HH:MM:SS.mmm и MM:SS.mmm) со склейкой плывущих строк YouTube."""
     raw = Path(path).read_text(encoding="utf-8", errors="replace")
     blocks = re.split(r"\n\s*\n", raw.replace("\r\n", "\n"))
     segs: List[Dict[str, Any]] = []
-    ts = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})[.,](\d{3})")
+    ts = re.compile(
+        r"(?:(\d{1,2}):)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{2}):(\d{2})[.,](\d{3})"
+    )
     for block in blocks:
         lines = [ln for ln in block.split("\n") if ln.strip() and not ln.startswith(("WEBVTT", "NOTE", "Kind:", "Language:"))]
         stamp = None
@@ -247,27 +271,47 @@ def parse_vtt(path: Path) -> List[Dict[str, Any]]:
         for ln in lines:
             m = ts.search(ln)
             if m:
-                g = list(map(int, m.groups()))
+                g = [int(v or 0) for v in m.groups()]
                 stamp = (g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000,
                          g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000)
             elif stamp:
-                text_lines.append(re.sub(r"<[^>]+>", "", ln).strip())
+                clean = re.sub(r"<[^>]+>", "", ln).strip()
+                if clean:
+                    text_lines.append(clean)
         if not stamp or not text_lines:
             continue
-        text = " ".join(text_lines).strip()
-        words_raw = text.split()
-        if not words_raw:
+        text = re.sub(r"\s+", " ", " ".join(text_lines)).strip()
+        if not text:
             continue
-        span = max(0.05, stamp[1] - stamp[0])
-        step = span / len(words_raw)
-        words = [{"word": w, "start": stamp[0] + i * step, "end": stamp[0] + (i + 1) * step}
-                 for i, w in enumerate(words_raw)]
-        segs.append({"start": stamp[0], "end": stamp[1], "text": text, "words": words})
-    # склейка дублей (автосубтитры YouTube дают «плывущие» строки)
+        segs.append({"start": stamp[0], "end": stamp[1], "text": text})
+    # склейка дублей и плывущих автосубтитров YouTube (где строка 2 повторяет конец строки 1)
     out: List[Dict[str, Any]] = []
     for s in segs:
-        if out and s["text"] == out[-1]["text"]:
-            out[-1]["end"] = s["end"]
-            continue
-        out.append(s)
+        text = s["text"]
+        if out:
+            prev = out[-1]["text"]
+            if text == prev:
+                out[-1]["end"] = max(out[-1]["end"], s["end"])
+                continue
+            if text.startswith(prev + " "):
+                text = text[len(prev):].strip()
+            else:
+                prev_words = prev.split()
+                cur_words = text.split()
+                overlap = 0
+                for k in range(min(len(prev_words), len(cur_words)), 0, -1):
+                    if prev_words[-k:] == cur_words[:k]:
+                        overlap = k
+                        break
+                if overlap:
+                    text = " ".join(cur_words[overlap:]).strip()
+            if not text:
+                out[-1]["end"] = max(out[-1]["end"], s["end"])
+                continue
+        words_raw = text.split()
+        span = max(0.05, s["end"] - s["start"])
+        step = span / len(words_raw)
+        words = [{"word": w, "start": s["start"] + i * step, "end": s["start"] + (i + 1) * step}
+                 for i, w in enumerate(words_raw)]
+        out.append({"start": s["start"], "end": s["end"], "text": text, "words": words})
     return out

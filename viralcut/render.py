@@ -44,9 +44,11 @@ def _log_fonts_dir(fonts_dir: Path) -> None:
 
 
 def _esc(path: Path) -> str:
-    # экранирование для аргумента фильтра ffmpeg
+    # Экранирование для аргумента фильтра ffmpeg внутри одинарных кавычек:
+    # в av_get_token обратный слэш внутри '...' не экранирует апостроф,
+    # поэтому апостроф закрывает кавычку, экранируется как \' и снова открывает '...'.
     p = str(path).replace("\\", "/")
-    p = p.replace(":", "\\:").replace("'", "\\'")
+    p = p.replace(":", "\\:").replace("'", "'\\\\\\''")
     return p
 
 
@@ -57,7 +59,7 @@ def _bg_chain(w: int, h: int, focus_x: float = 0.5, sharpen: bool = False,
         f"{src}split=2[bg][fg];"
         f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
         f"gblur=sigma=26:steps=2,eq=saturation=0.95[bgb];"
-        f"[fg]scale={w}:-2:flags=lanczos{sharp}[fgs];"
+        f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos{sharp}[fgs];"
         f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2:shortest=1[base]"
     )
 
@@ -212,7 +214,7 @@ def _find_hw_encoder(excluded: Tuple[str, ...] = ()) -> Optional[str]:
     """Ищет рабочий кодировщик. Вызывается под _HW_LOCK."""
     preferred = {"darwin": ["h264_videotoolbox"],
                  "win32": ["h264_nvenc", "h264_amf", "h264_qsv"],
-                 "linux": ["h264_nvenc", "h264_vaapi", "h264_qsv"]}.get(sys.platform, [])
+                 "linux": ["h264_nvenc", "h264_qsv"]}.get(sys.platform, [])
     # Выбор пользователя: дискретная карта (NVENC/AMF) или встроенная (Quick Sync)
     try:
         from . import gpu_pref
@@ -447,7 +449,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         cx = margin if "left" in corner else info["width"] - side - margin
         cy = margin if "top" in corner else info["height"] - side - margin
         pip_cam = {"x": cx, "y": cy, "w": side, "h": side}
-    pip_size = int(round(w * float((pip or {}).get("size", 0.28))))
+    pip_size = int(round(min(w, h) * float((pip or {}).get("size", 0.28))))
     pip_size -= pip_size % 2
     pip_mask = None
     if pip_cam and pip_size >= 64:
@@ -456,24 +458,29 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         pip_mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
 
     def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
-        sharp = sharpen_base
-        src = "[vsrc]" if segments else "[0:v]"
-        prefix = _video_spans_graph(segments, base) + ";" if segments else ""
-        if mode == "auto" and path_used:
-            sharp = float(path_used.get("crop_w", info["width"])) < w * 1.15
-            parts = [_auto_chain(w, h, path_used, sharp, src)]
-        elif mode == "blur" or (mode == "auto" and not path_used):
-            parts = [_bg_chain(w, h, focus_x, sharp, src)]
+        audio_only = not info.get("has_video", bool(info["width"] and info["height"]))
+        if audio_only:
+            parts = [f"color=c=#0f0e16:s={w}x{h}:r=30:d={duration:.3f}[base]"]
+            prefix = ""
         else:
-            parts = [_crop_chain(w, h, focus_x, sharpen=sharp, src=src)]
-        if pip_mask is not None and parts[0].rstrip().endswith("[base]"):
-            from . import pip as _pip
+            sharp = sharpen_base
+            src = "[vsrc]" if segments else "[0:v]"
+            prefix = _video_spans_graph(segments, base) + ";" if segments else ""
+            if mode == "auto" and path_used:
+                sharp = float(path_used.get("crop_w", info["width"])) < w * 1.15
+                parts = [_auto_chain(w, h, path_used, sharp, src)]
+            elif mode == "blur" or (mode == "auto" and not path_used):
+                parts = [_bg_chain(w, h, focus_x, sharp, src)]
+            else:
+                parts = [_crop_chain(w, h, focus_x, sharpen=sharp, src=src)]
+            if pip_mask is not None and parts[0].rstrip().endswith("[base]"):
+                from . import pip as _pip
 
-            pos = (pip or {}).get("pos") or [0.72, 0.78]
-            px = int(round(min(1.0, max(0.0, float(pos[0]))) * (w - pip_size)))
-            py = int(round(min(1.0, max(0.0, float(pos[1]))) * (h - pip_size)))
-            main_step = parts[0].rstrip()[:-len("[base]")] + "[_basem]"
-            parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step, src)]
+                pos = (pip or {}).get("pos") or [0.72, 0.78]
+                px = int(round(min(1.0, max(0.0, float(pos[0]))) * (w - pip_size)))
+                py = int(round(min(1.0, max(0.0, float(pos[1]))) * (h - pip_size)))
+                main_step = parts[0].rstrip()[:-len("[base]")] + "[_basem]"
+                parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step, src)]
         if ass_path is not None:
             fonts_dir = custom_fonts.libass_dir()
             _log_fonts_dir(fonts_dir)
@@ -534,8 +541,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         return built
 
     encoder_mode = _encoder_mode()
-    windows_gpu = sys.platform == "win32" and encoder_mode == "gpu"
     hw = hw_encoder(encoder_mode)
+    windows_gpu = sys.platform == "win32" and bool(hw)
     attempts = _encode_attempts(hw, crop_path, windows_gpu)
     tried_cpu = False
     tail_text = ""

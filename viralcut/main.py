@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import time
 import traceback
 import uuid
 from contextlib import asynccontextmanager
@@ -323,6 +324,8 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
     if body.cam:
         try:
             cam_clean: Dict[str, Any] = {k: int(body.cam[k]) for k in ("x", "y", "w", "h")}
+            if cam_clean["w"] <= 0 or cam_clean["h"] <= 0 or cam_clean["x"] < 0 or cam_clean["y"] < 0:
+                raise ValueError("invalid cam rect")
             if isinstance(body.cam.get("source"), (list, tuple)) and len(body.cam["source"]) >= 2:
                 cam_clean["source"] = [int(body.cam["source"][0]), int(body.cam["source"][1])]
             if body.cam.get("corner"):
@@ -335,7 +338,9 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
         current.pop("cam", None)
     if body.cam_share is not None:
         current["cam_share"] = max(0.15, min(0.45, float(body.cam_share)))
-    if body.pos:
+    if body.pos is not None:
+        if len(body.pos) < 2:
+            raise HTTPException(400, "Неверная позиция окна камеры")
         current["pos"] = [max(0.0, min(1.0, float(body.pos[0]))), max(0.0, min(1.0, float(body.pos[1])))]
     if body.size is not None:
         current["size"] = max(0.12, min(0.45, float(body.size)))
@@ -371,16 +376,25 @@ def storage_cleanup(body: CleanupIn = CleanupIn()) -> Dict[str, Any]:
 
 @app.get("/api/projects/{pid}/frame.jpg")
 def project_frame(pid: str, t: float = 0.0, width: int = 900) -> FileResponse:
+    import math
+
     project = db.get_project(pid)
     if not project or not project.get("source"):
         raise HTTPException(404, "Кадр недоступен")
+    if not math.isfinite(t) or t < 0:
+        t = 0.0
+    width = max(64, min(1920, int(width)))
     workdir = PROJECTS_DIR / pid
     out = workdir / f"frame_{int(t)}_{width}.jpg"
     if not out.exists():
+        tmp = workdir / f".frame_{int(t)}_{width}_{os.urandom(3).hex()}.jpg"
         try:
-            render.snapshot(Path(project["source"]), out, t=t, width=width)
+            render.snapshot(Path(project["source"]), tmp, t=t, width=width)
+            tmp.replace(out)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(500, f"Не удалось получить кадр: {exc}")
+            tmp.unlink(missing_ok=True)
+            if not out.exists():
+                raise HTTPException(500, f"Не удалось получить кадр: {exc}")
     return FileResponse(out, media_type="image/jpeg")
 
 
@@ -529,10 +543,11 @@ def ai_local(base: Optional[str] = None) -> Dict[str, Any]:
 
 
 @app.get("/api/ai/models")
-def ai_models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any]:
+def ai_models(force: bool = False, provider: Optional[str] = None,
+              base_url: Optional[str] = None) -> Dict[str, Any]:
     """Список моделей провайдера — для выпадающего списка в настройках."""
     try:
-        return ai.models(force=force, provider=provider)
+        return ai.models(force=force, provider=provider, base_url=base_url)
     except ai.AIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -768,7 +783,7 @@ async def upload(file: UploadFile = File(...), options: Optional[str] = Form(Non
                         "или поднимите VIRALCUT_MAX_UPLOAD_GB",
                     )
                 fh.write(chunk)
-    except HTTPException:
+    except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         db.delete_project(project["id"])
         raise
@@ -849,7 +864,8 @@ def project_start(pid: str, body: StartIn = StartIn()) -> Dict[str, Any]:
         raise HTTPException(400, "Видео ещё не готово к настройке")
     if jobs.is_running(pid):
         raise HTTPException(409, "Обработка уже идёт — дождитесь окончания или отмените")
-    options = pipeline.normalize_options(body.options or project.get("options"))
+    merged_opts = {**(project.get("options") or {}), **(body.options or {})}
+    options = pipeline.normalize_options(merged_opts)
     pipeline.clear_cancel(pid)
     pending = [c for c in db.list_clips(pid) if c["status"] == "pending"]
     if not (options.get("segments") and pending):
@@ -865,6 +881,9 @@ def project_cancel(pid: str) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
+    from . import live
+
+    live.stop_stream(pid)
     pipeline.request_cancel(pid)
     db.update_project(pid, status="cancelled", stage="Отменено", error=None)
     return {"ok": True}
@@ -876,8 +895,12 @@ def project_retry(pid: str, body: RetryIn = RetryIn()) -> Dict[str, Any]:
     if not project:
         raise HTTPException(404, "Проект не найден")
     if jobs.is_running(pid):
-        # текущая обработка ещё останавливается — поставим повтор в очередь
+        # Сначала даём текущему воркеру увидеть флаг отмены, иначе очистка
+        # флага сразу же позволит ему продолжить работу поверх нового прогона.
         pipeline.request_cancel(pid)
+        deadline = time.time() + 3.0
+        while jobs.is_running(pid) and time.time() < deadline:
+            time.sleep(0.1)
     print(f"[api] Пересборка проекта {pid} (force_hd={body.force_hd}, "
           f"prepare_only={body.prepare_only})", file=sys.stderr, flush=True)
     options = dict(project.get("options") or {})
@@ -885,7 +908,8 @@ def project_retry(pid: str, body: RetryIn = RetryIn()) -> Dict[str, Any]:
     if body.force_hd:
         # HD-повтор всегда целится в 1080p, даже если проект создавали в 360p
         options["max_height"] = max(1080, int(options.get("max_height") or 0))
-    pipeline.clear_cancel(pid)
+    if not jobs.is_running(pid):
+        pipeline.clear_cancel(pid)
     meta = project.get("meta") or {}
     if body.force_hd and meta.get("segments_mode"):
         # моменты уже найдены: не тратим время на повторное распознавание,
@@ -948,12 +972,15 @@ def project_pip_apply(pid: str) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
-    clips = [c for c in db.list_clips(pid) if c.get("path")]
+    source_ok = bool(project.get("source") and Path(project["source"]).exists())
+    live_ok = (PROJECTS_DIR / pid / "segments" / "times.jsonl").exists()
+    if not source_ok and not live_ok:
+        raise HTTPException(400, "Исходное видео недоступно — пересборка невозможна")
+    clips = [c for c in db.list_clips(pid) if c.get("status") == "ready" and c.get("path")]
     if not clips:
         raise HTTPException(400, "Нет готовых клипов — сначала запустите нарезку")
-    for clip in clips:
-        jobs.submit_rerender(clip["id"], {})
-    return {"ok": True, "clips": len(clips)}
+    queued = sum(1 for clip in clips if jobs.submit_rerender(clip["id"], {}))
+    return {"ok": True, "clips": queued, "total": len(clips)}
 
 
 @app.post("/api/projects/{pid}/style/apply")

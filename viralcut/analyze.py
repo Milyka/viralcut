@@ -87,11 +87,12 @@ HOOK_STARTERS = ["почему", "как", "что если", "а что", "зн
 AD_STRONG = [
     "промокод", "промо код", "промокоду", "скидк", "скидка", "скидку", "купон",
     "ссылка в описании", "в описании", "по ссылке", "спонсор", "реклама",
-    "рекламодател", "партнёр", "партнер", "при поддержке", "благодаря",
-    "спонсируется", "наш партн", "промо",
+    "рекламодател", "партнёр", "партнер", "при поддержке",
+    "спонсируется", "наш партн",
     "sponsored", "promo code", "discount", "use code", "link in the description",
-    "in the description", "our sponsor", "thanks to our", "partner",
+    "in the description", "our sponsor", "thanks to our", "our partner",
 ]
+_AD_WORD_RE = re.compile(r"\b(?:промо|promo)\b", re.I)
 AD_WEAK = [
     "подпишись", "подписывайтесь", "подписывайся", "бесплатн", "попробуй",
     "заказать", "магазин", "сервис", "доставка", "тариф", "бесплатный период",
@@ -99,13 +100,25 @@ AD_WEAK = [
     "subscribe", "free trial", "our partners", "check out", "sign up",
 ]
 
-_NUM_RE = re.compile(r"\d+[.,]?\d*|%|₽|\$|€|руб|тысяч|миллион|миллиард|процент", re.I)
+_NUM_RE = re.compile(
+    r"\d+[.,]?\d*|%|₽|\$|€|руб|тысяч|миллион|миллиард|процент|thousand|million|billion|percent|dollars?",
+    re.I,
+)
 _SENT_END = re.compile(r"[.!?…]+[\"'»)]*\s*$")
 _WORD_RE = re.compile(r"[\w\-']+", re.U)
+_CYR_RE = re.compile(r"[А-Яа-яЁё]")
 
 
 def _norm(text: str) -> str:
     return text.lower().replace("ё", "е")
+
+
+def _starts_with_phrase(text: str, phrases: List[str]) -> bool:
+    low = _norm(text).strip(" «\"'—-.,!?")
+    for p in phrases:
+        if low == p or (low.startswith(p) and len(low) > len(p) and not low[len(p)].isalnum()):
+            return True
+    return False
 
 
 def _count_patterns(text: str, patterns: List[str]) -> int:
@@ -114,14 +127,13 @@ def _count_patterns(text: str, patterns: List[str]) -> int:
 
 
 def _has_filler_start(text: str) -> bool:
-    low = _norm(text).strip(" «\"'—-")
-    return any(low.startswith(f) for f in FILLER_START)
+    return _starts_with_phrase(text, FILLER_START)
 
 
 def _ad_score(text: str) -> int:
     """Насколько фраза похожа на рекламную вставку (0 — не похожа)."""
     low = _norm(text)
-    strong = sum(1 for p in AD_STRONG if p in low)
+    strong = sum(1 for p in AD_STRONG if p in low) + (1 if _AD_WORD_RE.search(low) else 0)
     weak = sum(1 for p in AD_WEAK if p in low)
     return strong * 2 + weak
 
@@ -163,7 +175,7 @@ def _hook_bonus(text: str) -> float:
     """Бонус за цепляющее начало: вопрос, цифра, обещание."""
     low = _norm(text)
     bonus = 0.0
-    if any(low.startswith(h) for h in HOOK_STARTERS):
+    if _starts_with_phrase(low, HOOK_STARTERS):
         bonus += 3.0
     if re.search(r"\d", low[:40]):
         bonus += 1.5
@@ -383,7 +395,7 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
         hook += 0.30
     if _NUM_RE.search(first):
         hook += 0.18
-    if re.search(r"\b(ты|тебя|твой|вы|ваш|твое)\b", _norm(first)):
+    if re.search(r"\b(ты|тебя|твой|вы|ваш|твое|you|your|yours)\b", _norm(first)):
         hook += 0.16
     hits = _count_patterns(first, HOOK_PATTERNS_RU + HOOK_PATTERNS_EN)
     hook += min(0.42, hits * 0.16)
@@ -421,7 +433,9 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
         completeness = 0.85
     if _ends_with_continuation(sents[-1]):
         completeness -= 0.35
-    if last.endswith("?") or re.search(r"\b(вот и все|итог|вывод|запомни|вывод)\b", _norm(last)):
+    if last.endswith("?") or re.search(
+            r"\b(вот и все|итог|вывод|запомни|bottom line|takeaway|remember|in short|that's why)\b",
+            _norm(last)):
         completeness = 1.0
     if len(_WORD_RE.findall(last)) < 3:
         completeness -= 0.3
@@ -437,7 +451,10 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
 
     # 7. Наличие «крючка» в конце (вопрос/призыв)
     tail = _norm(" ".join(s["text"] for s in sents[-1:]))
-    payoff = 1.0 if ("?" in tail or re.search(r"\b(подпис|коммент|сохран|попроб|сделай)\b", tail)) else 0.45
+    payoff = 1.0 if (
+        "?" in tail
+        or re.search(r"\b(подпис\w*|коммент\w*|сохран\w*|попроб\w*|сделай\w*|subscribe\w*|comment\w*|save|try|share|follow\w*)\b", tail)
+    ) else 0.45
 
     # 8. Реакция аудитории: смех и аплодисменты — сильнейший сигнал «это
     # стоит смотреть», но по тексту его не видно, поэтому считаем по звуку.
@@ -525,12 +542,16 @@ def _make_title(sents: List[Dict[str, Any]]) -> str:
         if " " in cut:
             cut = cut[: cut.rfind(" ")]
         best = cut + "…"
-    return best[:1].upper() + best[1:] if best else "Фрагмент"
+    if best:
+        return best[:1].upper() + best[1:]
+    sample = " ".join(s.get("text") or "" for s in sents[:2])
+    return "Фрагмент" if _CYR_RE.search(sample) else "Highlight"
 
 
 def _make_caption(title: str, text: str, platform: str) -> str:
     tags = _keywords(text, 6)
-    base = ["shorts", "reels", "tiktok", "виральное", "нарезка"]
+    is_cyr = bool(_CYR_RE.search(text or title or ""))
+    base = ["shorts", "reels", "tiktok", "виральное", "нарезка"] if is_cyr else ["shorts", "reels", "tiktok", "viral", "clips"]
     tag_line = " ".join("#" + re.sub(r"[^\w]", "", t) for t in (tags + base) if t)
     return f"{title}\n\n{tag_line}"
 
@@ -687,12 +708,12 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
     for idx, c in enumerate(picked):
         start = c["start"]
         end = c["end"]
-        # аккуратные границы: отступаем в тишину
+        # аккуратные границы: вырезаем рекламные края наружу из клипа и отступаем в тишину
         for block in ad_blocks:
-            if start < block["start"] < end and start > block["start"] - 0.5:
-                start = block["start"]
-            if start < block["end"] < end and end < block["end"] + 0.5:
-                end = block["end"]
+            if block["start"] <= start < block["end"] < end and (end - block["end"]) >= min_dur * 0.7:
+                start = block["end"]
+            if start < block["start"] < end <= block["end"] and (block["start"] - start) >= min_dur * 0.7:
+                end = block["start"]
         start = max(0.0, _nearest_quiet(curve, mean_db, start - 0.10, hop, window=0.30))
         end = min(duration, _nearest_quiet(curve, mean_db, end + 0.18, hop))
         if scenes:

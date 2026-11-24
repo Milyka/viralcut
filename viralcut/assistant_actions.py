@@ -290,7 +290,14 @@ def parse_local(question: str) -> List[Dict[str, Any]]:
     if re.search(r"^(?:покажи|выведи|назови) .*?(?:таймкод|клип)|^список клипов", text):
         return [{"type": "list_current_clips"}]
     number = _clip_number(text)
-    if number is not None and re.search(r"поправ|исправ|измени|пересобер|сделай|убери", text):
+    has_url = bool(re.search(r"https?://", text))
+    # «сделай 3 клипа https://...» — это запуск нарезки (количество клипов), а не правка клипа №3!
+    is_count_cut = bool(
+        re.search(r"\b(?:сделай|нарежь|порежь|собери)\s+\d{1,2}\s+клип(?:а|ов)?\b", text)
+        and not re.search(r"№|перв|втор|трет|четверт|пят|шест|седьм|восьм|девят|десят", text)
+    )
+    if number is not None and not has_url and not is_count_cut and re.search(
+            r"поправ|исправ|измени|пересобер|сделай|убери", text):
         edit: Dict[str, Any] = {"type": "rerender_clip", "clip_number": number}
         for stem, accent in (
             ("ж[её]лт", "yellow"), ("золот", "gold"), ("оранжев", "orange"),
@@ -568,18 +575,23 @@ def _start_cut(action: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         if status in ("new", "", "error", "cancelled"):
             db.clear_clips(project_id)
             db.update_project(project_id, status="queued", stage="В очереди", progress=0, error=None)
-            jobs.submit_prepare(project_id)
+            jobs.submit_project(project_id)
         else:
             if status != "review":
                 db.clear_clips(project_id)
             db.update_project(project_id, status="queued", stage="В очереди", progress=0, error=None)
             jobs.submit_process(project_id)
         return {"ok": True, "type": "start_cut", "project_id": project_id,
+                "ui": {"open_project": project_id},
                 "message": "Запустил нарезку проекта — клипы появятся сами."}
 
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "type": "start_cut",
+                "message": "Укажите полную ссылку (начинается с http:// или https://)."}
     normalized = pipeline.normalize_options(options)
     project = db.create_project("pending", normalized, title=url[:120] or "Новый проект")
     db.update_project(project["id"], url=url)
-    jobs.submit_prepare(project["id"])
+    jobs.submit_project(project["id"])
     return {"ok": True, "type": "start_cut", "project_id": project["id"],
+            "ui": {"open_project": project["id"]},
             "message": "Принял ссылку — скачиваю и нарезаю."}

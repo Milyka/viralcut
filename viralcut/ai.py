@@ -177,11 +177,12 @@ _MODELS_CACHE: Dict[str, Any] = {"ts": 0.0, "base": "", "data": []}
 _MODELS_TTL = 600.0
 
 
-def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any]:
+def models(force: bool = False, provider: Optional[str] = None,
+           base_url: Optional[str] = None) -> Dict[str, Any]:
     """Каталог моделей провайдера (OpenAI-совместимый GET /models).
 
-    `provider` позволяет спросить каталог ещё до сохранения настроек — так
-    выпадающий список обновляется сразу при переключении в интерфейсе.
+    `provider` и `base_url` позволяют спросить каталог ещё до сохранения настроек —
+    так выпадающий список обновляется сразу при переключении в интерфейсе.
     У Polza.ai список публичный, но ключ, если он есть, отправляем тоже.
     """
     conf = _conf()
@@ -204,6 +205,9 @@ def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any
         # для custom адрес берём из настроек пользователя
         if provider == "custom":
             conf["base"] = str(saved.get("ai_base") or "").strip().rstrip("/")
+    override_base = str(base_url or "").strip().rstrip("/")
+    if override_base and (override_base.startswith("http://") or override_base.startswith("https://")):
+        conf = {**conf, "base": override_base}
     if force:
         _MODELS_CACHE["ts"] = 0.0
     now = time.time()

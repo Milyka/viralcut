@@ -89,11 +89,17 @@ def _hls_url(url: str, browser: Optional[str] = None) -> str:
                   and (f.get("vcodec") or "none") != "none"]
     if not candidates:
         raise RuntimeError("Не удалось получить живой поток (m3u8) по этой ссылке.")
-    return max(candidates, key=lambda f: f.get("height") or 0)["url"]
+    # Предпочитаем объединённый поток со звуком, иначе запись будет немой.
+    return max(
+        candidates,
+        key=lambda f: (1 if (f.get("acodec") or "none") != "none" else 0, f.get("height") or 0),
+    )["url"]
 
 
 def _http_get(url: str, timeout: float = 25.0) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "ViralCut/1.1",
+    from ._version import __version__
+
+    req = urllib.request.Request(url, headers={"User-Agent": f"ViralCut/{__version__}",
                                                "Accept": "*/*"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
@@ -246,15 +252,23 @@ class Recorder:
             db.merge_meta(self.pid, {"ad_intervals": self.ad_intervals[-200:]})
 
     def _download_pending(self, pending: List[Tuple[int, Dict[str, Any]]]) -> List[Tuple[int, Dict[str, Any], bytes]]:
-        """Скачивает пачку сегментов параллельно, порядок сохраняется."""
+        """Скачивает пачку сегментов параллельно; единичный 404 не роняет всю пачку."""
         workers = max(1, min(SEGMENT_WORKERS, len(pending)))
 
-        def fetch(item: Tuple[int, Dict[str, Any]]) -> bytes:
-            return _http_get(item[1]["uri"], timeout=25)
+        def fetch(item: Tuple[int, Dict[str, Any]]) -> Tuple[Optional[bytes], Optional[Exception]]:
+            try:
+                return _http_get(item[1]["uri"], timeout=25), None
+            except Exception as exc:  # noqa: BLE001
+                return None, exc
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="live-seg") as pool:
-            blobs = list(pool.map(fetch, pending))
-        return [(seq, seg, blob) for (seq, seg), blob in zip(pending, blobs)]
+            results = list(pool.map(fetch, pending))
+        ok = [(seq, seg, blob) for (seq, seg), (blob, _err) in zip(pending, results) if blob is not None]
+        if not ok:
+            first_err = next((err for _blob, err in results if err is not None), None)
+            if first_err is not None:
+                raise first_err
+        return ok
 
     def _reconnect(self, playlist_url: Optional[str], exc: Exception) -> Optional[str]:
         self.attempts += 1
@@ -371,12 +385,12 @@ def _seg_spans(workdir: Path, start: float, end: float) -> Tuple[List[Path], flo
                 continue
     entries.sort(key=lambda e: e[0])
     picked = [e for e in entries if e[1] < end and e[1] + e[2] > start]
-    if not picked:
+    existing = [(segments_dir / f"{seq:08d}.ts", st) for seq, st, _ in picked
+                if (segments_dir / f"{seq:08d}.ts").exists()]
+    if not existing:
         return [], 0.0
-    offset = picked[0][1]
-    paths = [segments_dir / f"{seq:08d}.ts" for seq, _, _ in picked
-             if (segments_dir / f"{seq:08d}.ts").exists()]
-    return paths, offset
+    offset = existing[0][1]
+    return [path for path, _ in existing], offset
 
 
 def _times_map(workdir: Path) -> Dict[int, float]:
@@ -443,18 +457,22 @@ def _ad_overlap(start: float, end: float, intervals: List[Dict[str, Any]]) -> fl
 
 
 def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
+    raw_mode = opts.get("mode") or "blur"
+    mode = "blur" if raw_mode == "auto" else raw_mode
     return {
         # в эфире по умолчанию показываем весь кадр (рабочее поле), а не кроп
         # по лицу: иначе клип превращается в крупный план стримера
         "aspect": opts.get("aspect", "9:16"),
-        "mode": opts.get("mode", "blur") if opts.get("mode") != "crop" else "crop",
+        "mode": mode,
         "subtitles": opts.get("subtitles", True), "accent": opts.get("accent", "yellow"),
         "uppercase": opts.get("uppercase", True), "show_hook": opts.get("show_hook", True),
         "focus_x": 0.5, "sub_size": int(opts.get("sub_size", 118)),
         "sub_font": opts.get("sub_font", "montserrat"),
         "sub_position": opts.get("sub_position", "bottom"),
         "sub_offset": int(opts.get("sub_offset", 0)),
+        "sub_free": opts.get("sub_free"),
         "sub_speed": opts.get("sub_speed", "calm"),
+        "cut_pauses": bool(opts.get("cut_pauses")),
     }
 
 
@@ -477,7 +495,8 @@ def _live_duration(pid: str) -> float:
 def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> None:
     """Пока идёт запись — каждое окно распознаётся и из него режутся моменты."""
     workdir = _workdir(pid)
-    language: Optional[str] = None
+    raw_lang = str(opts.get("language") or "").strip().lower()
+    language: Optional[str] = None if raw_lang in ("", "auto") else raw_lang
     processed = 0
     failures = 0
     try:
@@ -551,6 +570,12 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                 print(f"[live] found={len(found)}", file=sys.stderr)
             except Cancelled:
                 raise
+            except transcribe.NoSpeechError:
+                # В окне тишина/музыка — пропускаем сразу, без 3 повторных прогонов Whisper.
+                db.merge_meta(pid, {"live_processed": win_end})
+                db.update_project(pid, stage=f"Окно {label} без речи · иду дальше")
+                failures = 0
+                continue
             except Exception as exc:  # noqa: BLE001
                 failures += 1
                 short = f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -568,8 +593,9 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                 failures = 0
                 time.sleep(1)
                 continue
+            finally:
+                audio.unlink(missing_ok=True)
             failures = 0
-            audio.unlink(missing_ok=True)
 
             settings = _settings(opts)
             ready_count = int(meta.get("live_clips") or 0)
@@ -676,34 +702,39 @@ def stop_stream(pid: str) -> None:
 
 def run_stream(pid: str, options: Dict[str, Any]) -> None:
     stop = _STOP_EVENTS.setdefault(pid, threading.Event())
-    recorder = Recorder(pid, db.get_project(pid)["url"], stop, options.get("cookies_browser") or None)
-    record_thread = threading.Thread(target=recorder.run, name=f"live-rec-{pid}", daemon=True)
-    process_thread = threading.Thread(target=process_windows, args=(pid, options, stop),
-                                      name=f"live-proc-{pid}", daemon=True)
-    record_thread.start()
-    process_thread.start()
-    interrupted = False
-    while not stop.is_set() and record_thread.is_alive():
-        if not process_thread.is_alive():
-            # без нарезчика запись бессмысленна — не пишем диск впустую
-            interrupted = True
-            break
-        time.sleep(1)
-    stop.set()
-    record_thread.join(timeout=5)
-    # дожидаемся, пока последние окна дойдут до готовых клипов
-    process_thread.join()
-    project = db.get_project(pid) or {}
-    meta = project.get("meta") or {}
-    if interrupted:
-        db.update_project(pid, status="error",
-                          stage="Нарезка остановлена · запись прервана",
-                          error=project.get("error") or "Обработка клипов остановилась.")
-    elif project.get("status") == "cancelled":
-        db.update_project(pid, stage="Отменено")
-    elif meta.get("live_status") == "offline" and not int(meta.get("live_clips") or 0):
-        db.update_project(pid, status="done", stage="Запись остановлена · эфира не было")
-    else:
-        db.update_project(pid, status="done",
-                          stage=f"Запись завершена · клипов: {meta.get('live_clips', 0)}")
-    _STOP_EVENTS.pop(pid, None)
+    try:
+        proj = db.get_project(pid)
+        if not proj:
+            return
+        recorder = Recorder(pid, proj["url"], stop, options.get("cookies_browser") or None)
+        record_thread = threading.Thread(target=recorder.run, name=f"live-rec-{pid}", daemon=True)
+        process_thread = threading.Thread(target=process_windows, args=(pid, options, stop),
+                                          name=f"live-proc-{pid}", daemon=True)
+        record_thread.start()
+        process_thread.start()
+        interrupted = False
+        while not stop.is_set() and record_thread.is_alive():
+            if not process_thread.is_alive():
+                # без нарезчика запись бессмысленна — не пишем диск впустую
+                interrupted = True
+                break
+            time.sleep(1)
+        stop.set()
+        record_thread.join(timeout=5)
+        # дожидаемся, пока последние окна дойдут до готовых клипов
+        process_thread.join()
+        project = db.get_project(pid) or {}
+        meta = project.get("meta") or {}
+        if interrupted:
+            db.update_project(pid, status="error",
+                              stage="Нарезка остановлена · запись прервана",
+                              error=project.get("error") or "Обработка клипов остановилась.")
+        elif project.get("status") == "cancelled":
+            db.update_project(pid, stage="Отменено")
+        elif meta.get("live_status") == "offline" and not int(meta.get("live_clips") or 0):
+            db.update_project(pid, status="done", stage="Запись остановлена · эфира не было")
+        else:
+            db.update_project(pid, status="done",
+                              stage=f"Запись завершена · клипов: {meta.get('live_clips', 0)}")
+    finally:
+        _STOP_EVENTS.pop(pid, None)

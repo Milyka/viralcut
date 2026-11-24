@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from . import utils
 from .config import (DATA_DIR, MODELS_DIR, WHISPER_COMPUTE, WHISPER_DEVICE,
                      WHISPER_LOCAL_DIR, WHISPER_MODEL, ffmpeg)
+from .errors import Cancelled
 
 # Всё, что качает HuggingFace, держим внутри папки проекта.
 os.environ.setdefault("HF_HOME", str(DATA_DIR / "hf"))
@@ -282,24 +283,28 @@ def _segment_payload(seg, offset: float) -> Dict[str, Any]:
 def _consume(model, path: Path, language: Optional[str], use_vad: bool,
              offset: float, total_duration: float,
              on_progress: ProgressCb, batched: bool = False) -> Tuple[List[Dict[str, Any]], Any]:
+    def _iterate(segments_iter) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for seg in segments_iter:
+            payload = _segment_payload(seg, offset)
+            if not payload["text"]:
+                continue
+            rows.append(payload)
+            if on_progress and total_duration:
+                on_progress(min(0.99, (offset + float(seg.end)) / total_duration),
+                            "Распознавание речи")
+        return rows
+
     if batched:
         try:
             segments, tinfo = _decode_batched(model, path, language, use_vad)
+            return _iterate(segments), tinfo
+        except Cancelled:
+            raise
         except Exception as exc:  # noqa: BLE001 — пачечный режим не должен ломать распознавание
             print(f"[whisper] пачечный режим не сработал: {str(exc)[:160]}", file=sys.stderr, flush=True)
-            segments, tinfo = _decode(model, path, language, use_vad)
-    else:
-        segments, tinfo = _decode(model, path, language, use_vad)
-    out: List[Dict[str, Any]] = []
-    for seg in segments:
-        payload = _segment_payload(seg, offset)
-        if not payload["text"]:
-            continue
-        out.append(payload)
-        if on_progress and total_duration:
-            on_progress(min(0.99, (offset + float(seg.end)) / total_duration),
-                        "Распознавание речи")
-    return out, tinfo
+    segments, tinfo = _decode(model, path, language, use_vad)
+    return _iterate(segments), tinfo
 
 
 def _transcribe_span(model, path: Path, language: Optional[str], offset: float,
@@ -471,10 +476,13 @@ def _recheck(model, wav: Path, workdir: Path, segments: List[Dict[str, Any]],
             base_prompt = _prompt_for_language(language) or ""
             prompt = (context + (" " + base_prompt if base_prompt else "")).strip()[-400:] or None
             try:
-                parts, _ = _decode(model, clip, language, False, prompt=prompt,
-                                   beam=BEAM_SIZE, temperature=[0.0], condition=False)
+                raw_parts, _ = _decode(model, clip, language, False, prompt=prompt,
+                                       beam=BEAM_SIZE, temperature=[0.0], condition=False)
+                parts = list(raw_parts)
                 new_text = " ".join(p.text.strip() for p in parts).strip()
                 payloads = [_segment_payload(p, max(0.0, seg["start"] - 0.30)) for p in parts]
+            except Cancelled:
+                raise
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
                 continue
@@ -591,6 +599,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                 probe_language = detected_language
                 print(f"[whisper] язык: {detected_language} ({language_probability:.2f}) "
                       f"— по фрагментам с речью", file=sys.stderr, flush=True)
+        last_span_error: Optional[Exception] = None
         for index, (path, offset, length) in enumerate(spans):
             if not path.exists():
                 traceback.print_exc()
@@ -616,7 +625,10 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                 if not detected_language and getattr(tinfo, "language", None):
                     detected_language = tinfo.language
                     language_probability = round(float(getattr(tinfo, "language_probability", 0.0) or 0.0), 3)
-            except Exception:  # noqa: BLE001
+            except Cancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                last_span_error = exc
                 traceback.print_exc()
                 continue
             if len(spans) > 1 and on_progress:
@@ -624,6 +636,8 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                             f"Распознавание речи · часть {index + 1} из {len(spans)}")
 
         if not out:
+            if last_span_error is not None:
+                raise TranscriptionError(f"Ошибка распознавания речи: {str(last_span_error)[:220]}") from last_span_error
             raise NoSpeechError("Речь не распознана: возможно, в видео нет голоса.")
 
         # Второй проход по спорным местам — только когда аудио не разрезано на части.
@@ -633,17 +647,26 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                 on_progress(0.995, "Проверка спорных фрагментов…")
             try:
                 fixed = _recheck(model, wav, workdir, out, detected_language, on_progress, RECHECK_LIMIT)
+            except Cancelled:
+                raise
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
 
         expected_language = language or probe_language
         if not expected_language and (language_probability or 0.0) >= _PROBE_MIN_PROBABILITY:
             expected_language = detected_language
-        if expected_language and len(spans) == 1:
-            out, detected_language = _fix_language_mismatch(
-                model, wav, workdir, out, detected_language, on_progress, expected_language)
         if expected_language and subtitle_script_mismatch(out, expected_language):
-            raise TranscriptionError("Текст субтитров не совпал с языком речи. Проверьте выбранную аудиодорожку.")
+            if len(spans) == 1:
+                out, detected_language = _fix_language_mismatch(
+                    model, wav, workdir, out, detected_language, on_progress, expected_language)
+            if subtitle_script_mismatch(out, expected_language):
+                if language:
+                    raise TranscriptionError(
+                        "Текст субтитров не совпал с языком речи. Проверьте выбранную аудиодорожку.")
+                # В авто-режиме интро-проба могла ошибиться (например, английская песня в начале
+                # русского видео): доверяем фактическому алфавиту расшифровки, а не падаем.
+                cyr, lat = _script_counts(" ".join(str(seg.get("text") or "") for seg in out))
+                detected_language = "ru" if cyr >= lat else "en"
 
         out.sort(key=lambda s: s["start"])
         print(f"[whisper] итоговый язык: {detected_language or '?'} "

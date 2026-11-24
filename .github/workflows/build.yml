@@ -45,6 +45,17 @@ jobs:
       - name: Build
         run: pyinstaller ViralCut.spec --noconfirm --clean
 
+      - name: Verify VC++ Runtime version
+        shell: pwsh
+        run: |
+          $dll = "dist\ViralCut\_internal\msvcp140.dll"
+          if (-not (Test-Path $dll)) { throw "msvcp140.dll не найден в _internal" }
+          $v = (Get-Item $dll).VersionInfo
+          Write-Host "msvcp140.dll: $($v.FileVersion)"
+          if ($v.FileMajorPart -lt 14 -or ($v.FileMajorPart -eq 14 -and $v.FileMinorPart -lt 40)) {
+            throw "Устаревшая msvcp140.dll ($($v.FileVersion)) — вызовет краш ctranslate2/Whisper!"
+          }
+
       - name: Smoke test (headless HTTP)
         shell: pwsh
         run: |

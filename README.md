@@ -29,13 +29,13 @@
 
 ---
 
-## Скачать ViralCut 1.6.1
+## Скачать ViralCut 1.6.2
 
 | Платформа | Архив | Как открыть |
 |---|---|---|
 | **Windows 10/11 · x64** | [Переносимый ZIP][windows] | Распакуйте весь архив и запустите `ViralCut.exe` |
 
-В архив входят FFmpeg, модель Whisper Small и шрифты. Контрольные суммы и исходники доступны на [странице релиза v1.6.1][release].
+В архив входят FFmpeg, модель Whisper Small и шрифты. Контрольные суммы и исходники доступны на [странице релиза v1.6.2][release].
 
 ## Что нового в 1.6.1
 
@@ -47,8 +47,8 @@
 - **Диск и кэш:** автоудаление временного `audio16k.wav` и раздел очистки временных файлов и исходников в настройках.
 - **Управление клипами:** удаление отдельных клипов и кнопка «Ко всем клипам» в редакторе.
 
-[release]: https://github.com/Milyka/viralcut/releases/tag/v1.6.1
-[windows]: https://github.com/Milyka/viralcut/releases/download/v1.6.1/ViralCut-1.6.1-windows-x64.zip
+[release]: https://github.com/Milyka/viralcut/releases/tag/v1.6.2
+[windows]: https://github.com/Milyka/viralcut/releases/download/v1.6.2/ViralCut-1.6.2-windows-x64.zip
 
 ## Почему ViralCut
 

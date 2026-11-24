@@ -111,6 +111,41 @@ a = Analysis(
     optimize=0,
 )
 
+if IS_WIN:
+    # Wheels могут подкладывать старую msvcp140.dll (14.36), тогда как ctranslate2
+    # собран под VC++ 14.40+ (constexpr std::mutex) и падает с 0xc0000005 в _Mtx_lock.
+    # Заменяем все копии VC++ 14.x рантайма на единую свежую версию из System32.
+    _sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    _vc_names = {
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+    }
+    _seen_vc = set()
+    _fixed_binaries = []
+    for _dest, _src, _kind in a.binaries:
+        _low = Path(_dest).name.lower()
+        if _low in _vc_names:
+            _sys_dll = _sys32 / _low
+            if _sys_dll.is_file():
+                if _low not in _seen_vc:
+                    _seen_vc.add(_low)
+                    _fixed_binaries.append((Path(_dest).name, str(_sys_dll), _kind))
+                continue
+        _fixed_binaries.append((_dest, _src, _kind))
+    for _name in sorted(_vc_names - _seen_vc):
+        _sys_dll = _sys32 / _name
+        if _sys_dll.is_file():
+            _fixed_binaries.append((_name, str(_sys_dll), "BINARY"))
+    a.binaries = _fixed_binaries
+    a.datas = [
+        (_dest, _src, _kind)
+        for (_dest, _src, _kind) in a.datas
+        if Path(_dest).name.lower() not in _vc_names
+    ]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

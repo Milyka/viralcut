@@ -72,11 +72,14 @@ def _windows_targets() -> List[str]:
     except Exception:  # noqa: BLE001
         pass
     try:
-        from .config import ffmpeg
+        from .config import ffmpeg, ffmpeg_bin_dir
 
         binary = ffmpeg()
         if binary:
             targets.append(str(binary))
+        canonical = ffmpeg_bin_dir() / "ffmpeg.exe"
+        if canonical.exists():
+            targets.append(str(canonical))
     except Exception:  # noqa: BLE001
         pass
     return [path for path in dict.fromkeys(targets) if path]
@@ -108,6 +111,30 @@ def _apply_windows(mode: str) -> None:
             pass
 
 
+def _clear_windows() -> None:
+    """Удаляет ранее записанные предпочтения GPU при возврате в режим auto."""
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_PATH, 0,
+                             winreg.KEY_SET_VALUE)
+    except OSError:
+        return
+    try:
+        for target in _windows_targets():
+            try:
+                winreg.DeleteValue(key, target)
+            except OSError:
+                continue
+    finally:
+        try:
+            winreg.CloseKey(key)
+        except OSError:
+            pass
+
+
 def apply(mode: Optional[str] = None) -> Dict[str, Any]:
     """Применяет предпочтение. Возвращает, что удалось сделать."""
     target = (mode or preference()).strip().lower()
@@ -128,6 +155,8 @@ def apply(mode: Optional[str] = None) -> Dict[str, Any]:
         else:
             result["mechanism"] = "не поддерживается"
     else:
+        if sys.platform == "win32":
+            _clear_windows()
         result["mechanism"] = "системное решение"
     return result
 

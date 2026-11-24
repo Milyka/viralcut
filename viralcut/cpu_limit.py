@@ -92,18 +92,35 @@ _CPU_RATE_CONTROL_ENABLE = 0x1
 _CPU_RATE_CONTROL_HARD_CAP = 0x4
 
 
+def _windows_kernel32():
+    from ctypes import wintypes as wt
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wt.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
+    kernel32.SetInformationJobObject.restype = wt.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wt.BOOL
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wt.HANDLE
+    return kernel32
+
+
 def _windows_apply(percent: int) -> bool:
     """Ставит жёсткий потолок на процесс и всех его детей."""
     try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32 = _windows_kernel32()
     except Exception:  # noqa: BLE001
         return False
     try:
+        created = False
         if not _state.get("job"):
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
                 return False
             _state["job"] = job
+            created = True
         info = _JOBOBJECT_CPU_RATE_CONTROL_INFORMATION()
         info.ControlFlags = _CPU_RATE_CONTROL_ENABLE | _CPU_RATE_CONTROL_HARD_CAP
         # CpuRate — в сотых долях процента
@@ -112,8 +129,25 @@ def _windows_apply(percent: int) -> bool:
             _state["job"], _JOB_CPU_RATE_CONTROL, ctypes.byref(info), ctypes.sizeof(info))
         if not ok:
             return False
-        kernel32.AssignProcessToJobObject(_state["job"], kernel32.GetCurrentProcess())
+        if created:
+            kernel32.AssignProcessToJobObject(_state["job"], kernel32.GetCurrentProcess())
         return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _windows_disable() -> bool:
+    """Снимает жёсткий потолок CPU с существующего Job Object на Windows."""
+    job = _state.get("job")
+    if not job:
+        return True
+    try:
+        kernel32 = _windows_kernel32()
+        info = _JOBOBJECT_CPU_RATE_CONTROL_INFORMATION()
+        info.ControlFlags = 0
+        info.CpuRate = 0
+        return bool(kernel32.SetInformationJobObject(
+            job, _JOB_CPU_RATE_CONTROL, ctypes.byref(info), ctypes.sizeof(info)))
     except Exception:  # noqa: BLE001
         return False
 
@@ -334,6 +368,7 @@ def apply(percent: Optional[int] = None) -> Optional[int]:
 
         if sys.platform == "win32":
             if target >= 100:
+                _windows_disable()
                 _state["applied"] = target
                 return target
             if not _windows_apply(target):
@@ -358,6 +393,8 @@ def stop() -> None:
         if throttler is not None:
             throttler.stop()
             _state["throttler"] = None
+        if sys.platform == "win32":
+            _windows_disable()
         _state["applied"] = None
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,6 +26,15 @@ class ProjectIn(BaseModel):
     url: str
     options: Dict[str, Any] = {}
     prepare_only: bool = False
+
+
+class LocalProjectIn(BaseModel):
+    path: str
+    options: Dict[str, Any] = {}
+
+
+class CleanupIn(BaseModel):
+    include_sources: bool = False
 
 
 class PipIn(BaseModel):
@@ -60,6 +70,7 @@ class SettingsIn(BaseModel):
     ai_base: Optional[str] = None
     ai_model: Optional[str] = None
     ai_key: Optional[str] = None
+    clear_ai_key: Optional[bool] = None
     agent_mode: Optional[bool] = None
 
 
@@ -231,6 +242,7 @@ def health() -> Dict[str, Any]:
         "ffmpeg_path": binary,
         "ffprobe": probe,
         "whisper": transcribe.model_available(),
+        "whisper_cuda": transcribe._cuda_available(),
         "model": transcribe.model_cached(),
         # диагностика рендера: только из кэша, чтобы не тормозить интерфейс
         # пробным кадром GPU (на Windows без NVENC это секунды ожидания)
@@ -238,6 +250,7 @@ def health() -> Dict[str, Any]:
         "limits": resources.summary(),
         "cpu_cap": cpu_limit.status(),
         "projects": db.count_projects(),
+        "max_upload_bytes": MAX_UPLOAD_BYTES,
     }
 
 
@@ -328,6 +341,29 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
     return {"pip": current}
 
 
+@app.post("/api/projects/{pid}/pip/detect")
+def project_pip_detect(pid: str) -> Dict[str, Any]:
+    """Автоматически находит окно камеры стримера на исходнике проекта."""
+    try:
+        return pipeline.detect_project_pip(pid)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/storage")
+def storage_get() -> Dict[str, Any]:
+    """Статистика занятого места в папке данных ViralCut."""
+    return pipeline.storage_stats()
+
+
+@app.post("/api/storage/cleanup")
+def storage_cleanup(body: CleanupIn = CleanupIn()) -> Dict[str, Any]:
+    """Очистка временных файлов, кэша и (опционально) исходников готовых проектов."""
+    return pipeline.cleanup_storage(include_sources=body.include_sources)
+
+
 @app.get("/api/projects/{pid}/frame.jpg")
 def project_frame(pid: str, t: float = 0.0, width: int = 900) -> FileResponse:
     project = db.get_project(pid)
@@ -374,6 +410,8 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
     try:
         cpu_limit.apply()
         gpu_pref.apply()
+        if "encoder" in patch or "gpu_preference" in patch:
+            render.reset_hw_encoder()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     data = app_settings.public(data)
@@ -750,6 +788,29 @@ async def upload(file: UploadFile = File(...), options: Optional[str] = Form(Non
     return db.get_project(project["id"]) or project
 
 
+@app.post("/api/projects/local")
+def create_local_project(body: LocalProjectIn) -> Dict[str, Any]:
+    """Открывает локальный медиафайл без копирования через HTTP (нативный выбор)."""
+    try:
+        project = pipeline.create_local_project(body.path, body.options)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    jobs.submit_prepare(project["id"])
+    return project
+
+
+@app.get("/api/projects/{pid}/source")
+def project_source(pid: str) -> FileResponse:
+    """Отдаёт исходник проекта (включая локальный файл с другого диска без копии)."""
+    project = db.get_project(pid)
+    if not project or not project.get("source"):
+        raise HTTPException(404, "Исходник недоступен")
+    src = Path(project["source"])
+    if not src.is_file():
+        raise HTTPException(404, "Файл исходника не найден на диске")
+    return FileResponse(src)
+
+
 @app.get("/api/projects/{pid}")
 def project_detail(pid: str) -> Dict[str, Any]:
     project = db.get_project(pid)
@@ -769,7 +830,8 @@ def project_detail(pid: str) -> Dict[str, Any]:
             rel = Path(source).relative_to(PROJECTS_DIR).as_posix()
             project["source_url"] = "/media/" + quote(rel)
         except ValueError:
-            pass
+            if Path(source).is_file():
+                project["source_url"] = f"/api/projects/{pid}/source"
     return {"project": project, "clips": clips}
 
 
@@ -887,6 +949,30 @@ def project_pip_apply(pid: str) -> Dict[str, Any]:
     for clip in clips:
         jobs.submit_rerender(clip["id"], {})
     return {"ok": True, "clips": len(clips)}
+
+
+@app.post("/api/projects/{pid}/style/apply")
+def project_style_apply(pid: str, body: ClipEdit) -> Dict[str, Any]:
+    """Применяет выбранное оформление ко всем клипам проекта."""
+    payload = _clean_clip_edit(body)
+    try:
+        return pipeline.apply_style_to_project(pid, payload)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/clips/{cid}")
+def clip_delete(cid: str) -> Dict[str, Any]:
+    """Удаляет один клип из проекта и его файлы с диска."""
+    clip = db.get_clip(cid)
+    if not clip:
+        raise HTTPException(404, "Клип не найден")
+    if clip.get("status") == "rendering":
+        raise HTTPException(409, "Клип сейчас рендерится — дождитесь окончания")
+    pipeline.delete_clip(cid)
+    return {"ok": True}
 
 
 @app.post("/api/clips/{cid}/rerender")

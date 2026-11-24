@@ -341,7 +341,19 @@ def _run_encode(cmd: List[str], duration: float,
         proc.wait()
     finally:
         timer.cancel()
+        if proc.poll() is None:
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
         reader.join(timeout=2)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
     return proc.returncode, tail, (stopped[0] if stopped else None)
 
 

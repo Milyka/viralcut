@@ -143,7 +143,10 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
             data["ai_base"] = str(patch["ai_base"] or "").strip()[:300]
         if "ai_model" in patch:
             data["ai_model"] = str(patch["ai_model"] or "").strip()[:120]
-        if str(patch.get("ai_key") or "").strip():
+        if patch.get("clear_ai_key"):
+            data["ai_key"] = ""
+            data.pop("ai_key_scope", None)
+        elif str(patch.get("ai_key") or "").strip():
             data["ai_key"] = str(patch["ai_key"]).strip()
             data["ai_key_scope"] = ai_key_scope(data)
         if "agent_mode" in patch:

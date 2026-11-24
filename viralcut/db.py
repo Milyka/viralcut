@@ -276,6 +276,16 @@ def clear_clips(project_id: str) -> None:
         conn.execute("DELETE FROM clips WHERE project_id=?", (project_id,))
 
 
+def delete_clip(cid: str) -> Optional[Dict[str, Any]]:
+    """Удаляет один клип по ID и возвращает его запись для очистки файлов."""
+    clip = get_clip(cid)
+    if not clip:
+        return None
+    with session() as conn:
+        conn.execute("DELETE FROM clips WHERE id=?", (cid,))
+    return clip
+
+
 def reset_clips_pending(project_id: str) -> int:
     """Возвращает готовые клипы в очередь — при пересборке в HD."""
     with session() as conn:

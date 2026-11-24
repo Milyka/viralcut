@@ -20,21 +20,31 @@ def _make_detector():
 
     if _MODEL.exists():
         try:
-            return "yunet", cv2.FaceDetectorYN.create(str(_MODEL), "", (320, 320), 0.6, 0.3, 5000)
+            det = cv2.FaceDetectorYN.create(str(_MODEL), "", (320, 320), 0.6, 0.3, 5000)
+            return "yunet", det, [None]
         except Exception:
             pass
-    return "haar", None
+    if hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data"):
+        try:
+            cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+            return "haar", cascade, [None]
+        except Exception:
+            pass
+    return "none", None, [None]
 
 
-def _detect(detector: Tuple[str, Any], frame) -> List[Dict[str, float]]:
+def _detect(detector: Tuple[Any, ...], frame) -> List[Dict[str, float]]:
     import cv2
 
-    kind, det = detector
+    kind, det = detector[0], detector[1]
+    last_size = detector[2] if len(detector) > 2 else [None]
     h, w = frame.shape[:2]
     out: List[Dict[str, float]] = []
     if kind == "yunet" and det is not None:
         try:
-            det.setInputSize((w, h))
+            if last_size[0] != (w, h):
+                det.setInputSize((w, h))
+                last_size[0] = (w, h)
             _, faces = det.detect(frame)
         except Exception:
             faces = None
@@ -47,8 +57,14 @@ def _detect(detector: Tuple[str, Any], frame) -> List[Dict[str, float]]:
                 out.append({"cx": x + fw / 2, "cy": y + fh / 2, "w": fw, "h": fh, "score": score})
         return out
 
+    if kind == "none":
+        return out
+    cascade = det
+    if cascade is None:
+        if not (hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data")):
+            return out
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
     for (x, y, fw, fh) in faces:
         out.append({"cx": x + fw / 2, "cy": y + fh / 2, "w": float(fw), "h": float(fh), "score": 1.0})

@@ -28,7 +28,12 @@ def _detector():
             return cv2.FaceDetectorYN.create(str(_MODEL), "", (320, 320), 0.6, 0.3, 5000), "yunet"
         except Exception:  # noqa: BLE001
             pass
-    return cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"), "haar"
+    if hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data"):
+        try:
+            return cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"), "haar"
+        except Exception:  # noqa: BLE001
+            pass
+    return None, "none"
 
 
 def _faces(det, kind: str, frame) -> List[Tuple[float, float, float, float]]:
@@ -36,7 +41,7 @@ def _faces(det, kind: str, frame) -> List[Tuple[float, float, float, float]]:
 
     h, w = frame.shape[:2]
     out: List[Tuple[float, float, float, float]] = []
-    if kind == "yunet":
+    if kind == "yunet" and det is not None:
         try:
             det.setInputSize((w, h))
             _, found = det.detect(frame)
@@ -46,6 +51,8 @@ def _faces(det, kind: str, frame) -> List[Tuple[float, float, float, float]]:
             x, y, fw, fh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
             if float(f[-1]) > 0.5 and fw > 12:
                 out.append((x, y, fw, fh))
+        return out
+    if kind == "none" or det is None:
         return out
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     for (x, y, fw, fh) in det.detectMultiScale(gray, 1.1, 5, minSize=(18, 18)):

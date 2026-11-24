@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from . import db, jobs, pipeline, resources
+from . import db, jobs, pipeline, render, resources, subtitles
 
 # Что снимаем с модели: строгая схема, лишнее отбрасываем.
 ACTIONS_SPEC = """Доступные действия (только из этого списка):
@@ -25,14 +25,16 @@ ACTIONS_SPEC = """Доступные действия (только из это�
 {"type":"set_ai_mode","enabled":true|false,"prompt":"текст задания"}
 {"type":"start_cut","url":"ссылка","project_id":"id","count":1-50,"min_dur":3-120,"max_dur":5-180,
  "aspect":"9:16|1:1|16:9|4:5","mode":"auto|blur|crop","subtitles":true|false,
- "accent":"yellow|pink|cyan|lime|green|red|orange|lavender",
- "sub_size":40-240,"sub_font":"montserrat|lato|play|ptsans|oswald|unbounded|caveat|golos|onest|marmelad|stalinist|underdog",
+ "accent":"yellow|gold|orange|coral|red|rose|pink|magenta|violet|purple|indigo|blue|sky|cyan|teal|mint|green|lime|peach|lavender|white",
+ "sub_size":40-240,"sub_font":"montserrat|geologica|ibmplexcond|rubikmono|inter|manrope|lato|play|ptsans|oswald|unbounded|caveat|golos|onest|marmelad|stalinist|underdog|russo|rubik|exo2|philosopher|yeseva|comfortaa|badscript|marckscript|ruslan|robotocond",
  "sub_position":"bottom|middle|top","cut_pauses":true|false,"language":"auto|ru|en",
  "ai_mode":true|false,"ai_prompt":"текст"}
 {"type":"rerender_clip","clip_id":"id или clip_number","clip_number":1-50,"mode":"auto|blur|crop","aspect":"9:16|1:1|16:9|4:5",
  "accent":"...","sub_size":40-240,"sub_font":"...","sub_position":"...","cut_pauses":true|false,
  "sub_speed":"calm|normal|fast","text":"полный исправленный текст субтитров клипа"}
 {"type":"get_clip","clip_number":1-50}
+{"type":"undo_clip","clip_number":1-50}
+{"type":"list_current_clips"}
 Перед правкой текста вызови get_clip. Для «первого клипа» используй clip_number=1.
 Если правка не указана, спроси какую.
 {"type":"update_project","project_id":"id","aspect":"...","mode":"...","subtitles":true|false,
@@ -49,10 +51,10 @@ ACTIONS_SPEC = """Доступные действия (только из это�
 ```"""
 
 _ALLOWED = {"set_settings", "set_ai_mode", "start_cut", "rerender_clip", "update_project",
-            "list_projects", "get_project", "advice", "open_settings", "open_project", "get_clip"}
-_ACCENTS = {"yellow", "pink", "cyan", "lime", "green", "red", "orange", "lavender"}
-_FONTS = {"montserrat", "lato", "play", "ptsans", "oswald", "unbounded", "caveat",
-          "golos", "onest", "marmelad", "stalinist", "underdog", "marckscript"}
+            "list_projects", "get_project", "advice", "open_settings", "open_project",
+            "get_clip", "undo_clip", "list_current_clips"}
+_ACCENTS = set(subtitles.ACCENTS)
+_FONTS = set(subtitles.FONTS)
 _ASPECTS = {"9:16", "1:1", "16:9", "4:5"}
 _MODES = {"auto", "blur", "crop"}
 _POSITIONS = {"bottom", "middle", "top"}
@@ -91,10 +93,11 @@ def _style_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         out["aspect"] = item["aspect"]
     if str(item.get("mode") or "") in _MODES:
         out["mode"] = item["mode"]
-    if str(item.get("accent") or "") in _ACCENTS:
+    if str(item.get("accent") or "") in subtitles.ACCENTS:
         out["accent"] = item["accent"]
-    if str(item.get("sub_font") or "") in _FONTS:
-        out["sub_font"] = item["sub_font"]
+    font_key = str(item.get("sub_font") or "")
+    if font_key and subtitles.font_exists(font_key):
+        out["sub_font"] = font_key
     if str(item.get("sub_position") or "") in _POSITIONS:
         out["sub_position"] = item["sub_position"]
     if isinstance(item.get("sub_size"), (int, float)):
@@ -173,6 +176,16 @@ def validate(raw: Any) -> List[Dict[str, Any]]:
                 action.update(_style_fields(item))
                 if len(action) > 2:
                     result.append(action)
+        elif kind == "undo_clip":
+            cid = str(item.get("clip_id") or "").strip()
+            if cid:
+                action["clip_id"] = cid
+            number = item.get("clip_number")
+            if isinstance(number, int) and not isinstance(number, bool) and 1 <= number <= 50:
+                action["clip_number"] = number
+            result.append(action)
+        elif kind == "list_current_clips":
+            result.append(action)
         elif kind == "list_projects":
             result.append(action)
         elif kind == "get_project":
@@ -350,12 +363,14 @@ def execute(action: Dict[str, Any],
         from . import ai as ai_module  # noqa: F401 — ключи не трогаем
         from . import cpu_limit, gpu_pref, settings
 
-        patch = {key: action[key] for key in ("power", "cpu_limit", "gpu_preference")
+        patch = {key: action[key] for key in ("power", "cpu_limit", "gpu_preference", "encoder")
                  if key in action}
         settings.update(patch)
         resources.invalidate()
         cpu_limit.apply()
         gpu_pref.apply()
+        if "encoder" in patch or "gpu_preference" in patch:
+            render.reset_hw_encoder()
         summary = resources.summary()
         return {"ok": True, "type": kind, "applied": patch,
                 "summary": {key: summary.get(key) for key in

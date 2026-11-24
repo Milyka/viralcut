@@ -172,13 +172,19 @@ def iter_audio_mono(src: Path, sample_rate: int = 16000, *,
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             **subprocess_kwargs())
     try:
+        carry = b""
         while True:
             chunk = proc.stdout.read(block_bytes) if proc.stdout else b""
             if not chunk:
                 break
+            if carry:
+                chunk = carry + chunk
+                carry = b""
             if len(chunk) % 2:
-                chunk = chunk[:-1]  # неполный сэмпл: дочитаем со следующим блоком
-            yield np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                carry = chunk[-1:]
+                chunk = chunk[:-1]
+            if chunk:
+                yield np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
     finally:
         try:
             if proc.stdout:

@@ -87,6 +87,25 @@ def model_available() -> bool:
         return False
 
 
+def _cuda_available() -> bool:
+    """Проверяет, есть ли CUDA GPU для faster-whisper (ctranslate2) и не выключен ли GPU."""
+    if os.environ.get("VIRALCUT_WHISPER_CUDA", "1").strip().lower() in ("0", "false", "no", "off"):
+        return False
+    try:
+        from . import settings as app_settings
+
+        if app_settings.get().get("encoder") == "cpu":
+            return False
+    except Exception:
+        pass
+    try:
+        import ctranslate2
+
+        return int(ctranslate2.get_cuda_device_count()) > 0
+    except Exception:
+        return False
+
+
 def _reset_model(long_audio: bool = False) -> None:
     global _MODEL, _MODEL_LONG
     with _MODEL_LOCK:
@@ -110,11 +129,12 @@ def _get_model(long_audio: bool = False):
         # Для длинных аудио не используем экспериментальный MPS — на нём
         # ctranslate2 может «зависнуть» на середине многочасового файла.
         if WHISPER_DEVICE == "auto":
-            # Apple Metal доступен только на macOS; на Windows/Linux сразу CPU.
-            if long_audio or sys.platform != "darwin":
-                candidates = [("cpu", WHISPER_COMPUTE)]
+            if sys.platform == "darwin":
+                candidates = [("cpu", WHISPER_COMPUTE)] if long_audio else [("mps", "float16"), ("cpu", WHISPER_COMPUTE)]
+            elif _cuda_available():
+                candidates = [("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", WHISPER_COMPUTE)]
             else:
-                candidates = [("mps", "float16"), ("cpu", WHISPER_COMPUTE)]
+                candidates = [("cpu", WHISPER_COMPUTE)]
         else:
             candidates = [(WHISPER_DEVICE, WHISPER_COMPUTE)]
         last_exc = None
@@ -521,105 +541,111 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
     # Чистим звук: убираем низкочастотный гул и шипение, выравниваем громкость.
     wav = utils.extract_asr_audio(media, workdir / "audio16k.wav",
                                   audio_track=audio_track, window=window)
-    chunk_seconds = max(120, int(os.environ.get("VIRALCUT_WHISPER_CHUNK", "600")))
-    trigger = max(chunk_seconds, int(os.environ.get("VIRALCUT_WHISPER_CHUNK_MIN", "1800")))
-    long_audio = duration > trigger
-    batched = (duration >= BATCH_MIN_SECONDS
-               and os.environ.get("VIRALCUT_WHISPER_BATCH", "1").strip() not in ("0", "false", "no", "off"))
-    model = _get_model(long_audio=long_audio)
-    spans: List[tuple[Path, float, float]] = [(wav, 0.0, duration)]
     chunks_folder: Optional[Path] = None
-    if duration > trigger:
-        split, chunks_folder = _split_audio(wav, workdir, chunk_seconds)
-        if split:
-            spans = split
+    try:
+        chunk_seconds = max(120, int(os.environ.get("VIRALCUT_WHISPER_CHUNK", "600")))
+        trigger = max(chunk_seconds, int(os.environ.get("VIRALCUT_WHISPER_CHUNK_MIN", "1800")))
+        long_audio = duration > trigger
+        batched = (duration >= BATCH_MIN_SECONDS
+                   and os.environ.get("VIRALCUT_WHISPER_BATCH", "1").strip() not in ("0", "false", "no", "off"))
+        model = _get_model(long_audio=long_audio)
+        spans: List[tuple[Path, float, float]] = [(wav, 0.0, duration)]
+        if duration > trigger:
+            split, chunks_folder = _split_audio(wav, workdir, chunk_seconds)
+            if split:
+                spans = split
 
-    out: List[Dict[str, Any]] = []
-    detected_language = language
-    language_probability = None
-    probe_language: Optional[str] = None
-    if language is None:
-        # Сначала определяем язык по фрагменту с речью и дальше декодируем уже
-        # с явным языком: так интро с музыкой не уводит субтитры в английский.
-        probe = _probe_language(model, wav, duration, workdir)
-        if probe and probe[1] >= _PROBE_MIN_PROBABILITY:
-            detected_language, language_probability = probe
-            probe_language = detected_language
-            print(f"[whisper] язык: {detected_language} ({language_probability:.2f}) "
-                  f"— по фрагментам с речью", file=sys.stderr, flush=True)
-    for index, (path, offset, length) in enumerate(spans):
-        if not path.exists():
-            traceback.print_exc()
-            continue
-        timeout = max(240.0, length * 40)
-        try:
-            result = _run_with_timeout(
-                lambda: _transcribe_span(model, path, detected_language, offset,
-                                         duration, on_progress, batched),
-                timeout,
-            )
-            if result is None:
-                # часть зависла (например, в драйвере Metal) — перезапускаем модель и идём дальше
-                print(f"whisper chunk {index} timed out; skipping", file=sys.stderr)
-                _reset_model(long_audio)
-                model = _get_model(long_audio=long_audio)
-                if on_progress:
-                    on_progress(min(0.99, (offset + length) / max(1.0, duration)),
-                                f"Часть {index + 1} зависла · пропускаю")
+        out: List[Dict[str, Any]] = []
+        detected_language = language
+        language_probability = None
+        probe_language: Optional[str] = None
+        if language is None:
+            # Сначала определяем язык по фрагменту с речью и дальше декодируем уже
+            # с явным языком: так интро с музыкой не уводит субтитры в английский.
+            probe = _probe_language(model, wav, duration, workdir)
+            if probe and probe[1] >= _PROBE_MIN_PROBABILITY:
+                detected_language, language_probability = probe
+                probe_language = detected_language
+                print(f"[whisper] язык: {detected_language} ({language_probability:.2f}) "
+                      f"— по фрагментам с речью", file=sys.stderr, flush=True)
+        for index, (path, offset, length) in enumerate(spans):
+            if not path.exists():
+                traceback.print_exc()
                 continue
-            part, tinfo = result
-            out.extend(part)
-            if not detected_language and getattr(tinfo, "language", None):
-                detected_language = tinfo.language
-                language_probability = round(float(getattr(tinfo, "language_probability", 0.0) or 0.0), 3)
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-            continue
-        if len(spans) > 1 and on_progress:
-            on_progress(min(0.99, (offset + length) / max(1.0, duration)),
-                        f"Распознавание речи · часть {index + 1} из {len(spans)}")
+            timeout = max(240.0, length * 40)
+            try:
+                result = _run_with_timeout(
+                    lambda: _transcribe_span(model, path, detected_language, offset,
+                                             duration, on_progress, batched),
+                    timeout,
+                )
+                if result is None:
+                    # часть зависла (например, в драйвере Metal) — перезапускаем модель и идём дальше
+                    print(f"whisper chunk {index} timed out; skipping", file=sys.stderr)
+                    _reset_model(long_audio)
+                    model = _get_model(long_audio=long_audio)
+                    if on_progress:
+                        on_progress(min(0.99, (offset + length) / max(1.0, duration)),
+                                    f"Часть {index + 1} зависла · пропускаю")
+                    continue
+                part, tinfo = result
+                out.extend(part)
+                if not detected_language and getattr(tinfo, "language", None):
+                    detected_language = tinfo.language
+                    language_probability = round(float(getattr(tinfo, "language_probability", 0.0) or 0.0), 3)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+                continue
+            if len(spans) > 1 and on_progress:
+                on_progress(min(0.99, (offset + length) / max(1.0, duration)),
+                            f"Распознавание речи · часть {index + 1} из {len(spans)}")
 
-    if chunks_folder is not None:
-        shutil.rmtree(chunks_folder, ignore_errors=True)
-    if not out:
-        raise NoSpeechError("Речь не распознана: возможно, в видео нет голоса.")
+        if not out:
+            raise NoSpeechError("Речь не распознана: возможно, в видео нет голоса.")
 
-    # Второй проход по спорным местам — только когда аудио не разрезано на части.
-    fixed = 0
-    if len(spans) == 1 and RECHECK_LIMIT > 0:
-        if on_progress:
-            on_progress(0.995, "Проверка спорных фрагментов…")
+        # Второй проход по спорным местам — только когда аудио не разрезано на части.
+        fixed = 0
+        if len(spans) == 1 and RECHECK_LIMIT > 0:
+            if on_progress:
+                on_progress(0.995, "Проверка спорных фрагментов…")
+            try:
+                fixed = _recheck(model, wav, workdir, out, detected_language, on_progress, RECHECK_LIMIT)
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+
+        expected_language = language or probe_language
+        if not expected_language and (language_probability or 0.0) >= _PROBE_MIN_PROBABILITY:
+            expected_language = detected_language
+        if expected_language and len(spans) == 1:
+            out, detected_language = _fix_language_mismatch(
+                model, wav, workdir, out, detected_language, on_progress, expected_language)
+        if expected_language and subtitle_script_mismatch(out, expected_language):
+            raise TranscriptionError("Текст субтитров не совпал с языком речи. Проверьте выбранную аудиодорожку.")
+
+        out.sort(key=lambda s: s["start"])
+        print(f"[whisper] итоговый язык: {detected_language or '?'} "
+              f"| сегментов: {len(out)}", file=sys.stderr, flush=True)
+        logprobs = [s.get("quality", {}).get("avg_logprob", 0.0) for s in out]
+        weak = sum(1 for value in logprobs if value < WEAK_LOGPROB)
+        confidence = round(sum(logprobs) / len(logprobs), 3) if logprobs else 0.0
+
+        return {
+            "language": (detected_language or language or "ru"),
+            "duration": duration,
+            "segments": out,
+            "engine": f"whisper-{WHISPER_MODEL}",
+            "took": round(time.time() - started, 1),
+            "quality": {
+                "confidence": confidence,
+                "weak_segments": weak,
+                "rechecked": fixed,
+                "language_probability": language_probability,
+            },
+        }
+    finally:
+        if chunks_folder is not None:
+            shutil.rmtree(chunks_folder, ignore_errors=True)
         try:
-            fixed = _recheck(model, wav, workdir, out, detected_language, on_progress, RECHECK_LIMIT)
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-
-    expected_language = language or probe_language
-    if not expected_language and (language_probability or 0.0) >= _PROBE_MIN_PROBABILITY:
-        expected_language = detected_language
-    if expected_language and len(spans) == 1:
-        out, detected_language = _fix_language_mismatch(
-            model, wav, workdir, out, detected_language, on_progress, expected_language)
-    if expected_language and subtitle_script_mismatch(out, expected_language):
-        raise TranscriptionError("Текст субтитров не совпал с языком речи. Проверьте выбранную аудиодорожку.")
-
-    out.sort(key=lambda s: s["start"])
-    print(f"[whisper] итоговый язык: {detected_language or '?'} "
-          f"| сегментов: {len(out)}", file=sys.stderr, flush=True)
-    logprobs = [s.get("quality", {}).get("avg_logprob", 0.0) for s in out]
-    weak = sum(1 for value in logprobs if value < WEAK_LOGPROB)
-    confidence = round(sum(logprobs) / len(logprobs), 3) if logprobs else 0.0
-
-    return {
-        "language": (detected_language or language or "ru"),
-        "duration": duration,
-        "segments": out,
-        "engine": f"whisper-{WHISPER_MODEL}",
-        "took": round(time.time() - started, 1),
-        "quality": {
-            "confidence": confidence,
-            "weak_segments": weak,
-            "rechecked": fixed,
-            "language_probability": language_probability,
-        },
-    }
+            wav.unlink(missing_ok=True)
+        except OSError:
+            pass

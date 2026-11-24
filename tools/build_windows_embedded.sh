@@ -128,12 +128,14 @@ set "PYTHONNET_RUNTIME=netfx"
 set "VIRALCUT_WHISPER_DIR=%CD%\models\whisper-small"
 set "VC_LOG=%APPDATA%\ViralCut\app.log"
 
-rem Запуск без консоли. Если окно не появилось — показываем ошибку в консоли,
-rem иначе пользователь видел «ничего не произошло» и не знал, что случилось.
-start "" "%CD%\python\pythonw.exe" "%CD%\desktop\main.py"
+rem Запуск без консоли. Проверяем именно PID запущенного процесса, а не любой
+rem pythonw.exe в системе. Если окно не появилось — показываем ошибку в консоли.
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "(Start-Process -FilePath '%CD%\python\pythonw.exe' -ArgumentList '\"%CD%\desktop\main.py\"' -PassThru).Id"`) do set "VC_PID=%%P"
 timeout /t 4 /nobreak >nul
-tasklist /FI "IMAGENAME eq pythonw.exe" 2>nul | find /I "pythonw.exe" >nul
-if not errorlevel 1 exit /b 0
+if defined VC_PID (
+  tasklist /FI "PID eq %VC_PID%" 2>nul | find "%VC_PID%" >nul
+  if not errorlevel 1 exit /b 0
+)
 
 echo.
 echo ViralCut не запустился. Ниже ошибка — её можно прислать разработчику.

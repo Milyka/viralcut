@@ -160,7 +160,8 @@ def status() -> Dict[str, Any]:
     return {
         "provider": conf["provider"],
         "providers": [{"key": k, "label": v["label"], "base": v["base"],
-                       "model": v["model"], "key_url": v["key_url"]}
+                       "model": v["model"], "key_url": v["key_url"],
+                       "note": v.get("note", ""), "keyless": bool(v.get("keyless"))}
                       for k, v in PROVIDERS.items()],
         "base": conf["base"],
         "model": conf["model"],

@@ -2,8 +2,8 @@
 
 ## Скачать и запустить
 
-1. Скачайте `ViralCut-1.2.1-windows-x64.zip` из раздела **Releases** на GitHub.
-2. Распакуйте архив в любую папку, например `C:\ViralCut`.
+1. Скачайте `ViralCut-1.6.0-windows-x64-portable.zip` из раздела **Releases** на GitHub.
+2. Распакуйте архив целиком в любую папку, например `C:\ViralCut`.
 3. Запустите `ViralCut.exe`.
 
 Сборка не подписана сертификатом, поэтому SmartScreen может показать предупреждение:
@@ -42,12 +42,12 @@ powershell -ExecutionPolicy Bypass -File build_windows.ps1
 
 Скрипт создаст `.venv-win`, поставит PyInstaller, скачает модель Whisper Small
 (если её нет), соберёт `dist\ViralCut\ViralCut.exe` и упакует
-`release\ViralCut-1.2.1-windows-x64.zip`.
+`release\ViralCut-1.6.0-windows-x64.zip`.
 
 Флаги:
 
 - `-SkipModel` — не скачивать модель (приложение докачает её при первом запуске).
-- `-Version 1.2.1` — версия в имени архива.
+- `-Version 1.6.0` — версия в имени архива.
 
 ## GitHub Actions
 
@@ -64,7 +64,7 @@ macOS-архив для Apple Silicon собирается локально (`./
 ```bash
 git init
 git add .
-git commit -m "ViralCut 1.2.1"
+git commit -m "ViralCut 1.6.0"
 git branch -M main
 git remote add origin https://github.com/<user>/<repo>.git
 git push -u origin main
@@ -73,8 +73,8 @@ git push -u origin main
 Тег для релиза:
 
 ```bash
-git tag v1.2.1
-git push origin v1.2.1
+git tag v1.6.0
+git push origin v1.6.0
 ```
 
 ## Ограничения Windows-сборки

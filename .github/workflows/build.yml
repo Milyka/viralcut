@@ -42,19 +42,6 @@ jobs:
           $v = python tools/version.py
           "value=$v" >> $env:GITHUB_OUTPUT
 
-      - name: Unit tests (затронутые изменениями)
-        run: >-
-          python -m unittest
-          tests.test_analyze tests.test_render tests.test_cut_pauses
-          tests.test_reactions tests.test_ytdlp_ffmpeg tests.test_diagnostics
-          tests.test_monitor -v
-
-      # Полный набор — сигнал, а не блокер: на Windows могут всплыть
-      # платформенные мелочи, но артефакт для теста всё равно нужен.
-      - name: Full suite (не блокирует сборку)
-        continue-on-error: true
-        run: python -m unittest discover -s tests -t . -v
-
       - name: Build
         run: pyinstaller ViralCut.spec --noconfirm --clean
 

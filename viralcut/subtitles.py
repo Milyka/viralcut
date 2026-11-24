@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .utils import ass_time
 
@@ -302,16 +302,20 @@ def _merge_short_cues(cues: List[List[Dict[str, Any]]], clip_len: float,
     return merged
 
 
-def _pos_tag(position: str, offset: int) -> str:
+def _pos_tag(position: str, offset: int, free_pos: Optional[List[float]] = None) -> str:
     """Возвращает override-тег положения. offset > 0 — выше/дальше от края."""
+    if free_pos and len(free_pos) == 2:
+        try:
+            fx = max(0.05, min(0.95, float(free_pos[0])))
+            fy = max(0.05, min(0.95, float(free_pos[1])))
+            return f"\\an5\\pos({int(round(fx * PLAY_W))},{int(round(fy * PLAY_H))})"
+        except (TypeError, ValueError):
+            pass
     if position == "top":
         y = max(60, 260 - offset)
         return f"\\an8\\pos({PLAY_W // 2},{y})"
     if position == "middle":
         y = max(120, min(PLAY_H - 120, 960 - offset))
-        if free_pos and len(free_pos) == 2:
-            return (f"\\an5\\pos({int(float(free_pos[0]) * PLAY_W)},"
-                    f"{int(float(free_pos[1]) * PLAY_H)})")
         return f"\\an5\\pos({PLAY_W // 2},{y})"
     y = max(200, min(PLAY_H - 80, 1580 - offset))
     return f"\\an2\\pos({PLAY_W // 2},{y})"
@@ -434,7 +438,7 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
     )
     events: List[str] = []
     clip_len = max(0.1, clip_end - clip_start)
-    pos = _pos_tag(position, int(offset))
+    pos = _pos_tag(position, int(offset), free_pos)
 
     local = []
     for w in words:

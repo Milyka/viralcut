@@ -178,6 +178,32 @@ class DesktopApi:
         value = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
         return {"ok": True, "path": str(value)}
 
+    def choose_media_file(self) -> Dict[str, Any]:
+        """Нативный диалог выбора локального видео/аудио без копирования через HTTP."""
+        try:
+            import webview
+
+            windows = getattr(webview, "windows", None) or []
+            if not windows:
+                return {"ok": False, "unavailable": True}
+            file_types = (
+                "Видео и аудио (*.mp4;*.mov;*.mkv;*.webm;*.m4v;*.avi;*.ts;*.mts;*.m2ts;*.mp3;*.m4a;*.wav;*.aac;*.ogg;*.flac)",
+                "Все файлы (*.*)",
+            )
+            chosen = windows[0].create_file_dialog(
+                webview.OPEN_DIALOG,
+                directory=str(downloads_dir()),
+                allow_multiple=False,
+                file_types=file_types,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"open media dialog failed: {exc}", flush=True)
+            return {"ok": False, "unavailable": True}
+        if not chosen:
+            return {"ok": False, "cancelled": True}
+        value = chosen[0] if isinstance(chosen, (list, tuple)) else chosen
+        return {"ok": True, "path": str(value)}
+
     def save_source(self, project_id: str) -> Dict[str, Any]:
         """Сохранить скачанный исходник в выбранную папку."""
         from viralcut import db
@@ -246,7 +272,12 @@ class DesktopApi:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)[:300]}
         name = f"viralcut_{self._safe(project.get('title') or 'clips')}.zip"
-        target = self._ask_target(name) if self._ask_enabled() else "unavailable"
+        from viralcut import settings as app_settings
+
+        conf = app_settings.get()
+        preset_dir = conf.get("clips_dir") or ""
+        ask = self._ask_enabled() and (conf.get("ask_folder", True) or not preset_dir)
+        target = self._ask_target(name) if ask else "unavailable"
         if target is None:
             return {"ok": False, "cancelled": True}
         if target == "unavailable":

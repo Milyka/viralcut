@@ -10,6 +10,9 @@ build_tools/
 .pycache/
 .pyinstaller*/
 *.log
+release/*.zip
+release/*.dmg
+release/SHA256SUMS-*.txt
 release/*/*.zip
 release/*/*.dmg
 desktop/vendor.tar.gz

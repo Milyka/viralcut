@@ -15,7 +15,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import analyze, db, downloader, reframe, render, subtitles, transcribe, utils
 from .errors import Cancelled
-from .config import PROJECTS_DIR
+from .config import DATA_DIR, PROJECTS_DIR
+
+ALLOWED_MEDIA_SUFFIXES = {
+    ".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".mts", ".m2ts",
+    ".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac",
+}
+
+STYLE_KEYS = (
+    "aspect", "mode", "subtitles", "accent", "uppercase", "show_hook",
+    "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free",
+    "sub_speed", "cut_pauses",
+)
 
 DEFAULT_OPTIONS: Dict[str, Any] = {
     "count": 10,
@@ -90,6 +101,15 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         opts["sub_offset"] = max(-120, min(180, int(opts.get("sub_offset", 0))))
     except Exception:
         opts["sub_offset"] = 0
+    raw_free = opts.get("sub_free")
+    if isinstance(raw_free, (list, tuple)) and len(raw_free) >= 2:
+        try:
+            fx, fy = float(raw_free[0]), float(raw_free[1])
+            opts["sub_free"] = [round(max(0.0, min(1.0, fx)), 4), round(max(0.0, min(1.0, fy)), 4)]
+        except (TypeError, ValueError):
+            opts["sub_free"] = None
+    else:
+        opts["sub_free"] = None
     try:
         mh = int(opts.get("max_height", 1080))
     except Exception:
@@ -529,20 +549,32 @@ def process_project(pid: str) -> None:
                 # У субтитров площадки нет привязки к выбранной звуковой дорожке.
                 raise RuntimeError("Не удалось распознать выбранную аудиодорожку. " + str(exc)[:300]) from exc
             wanted = (opts.get("language") or "").lower()
-            if wanted and project["url"].startswith(("https://", "http://")):
-                sub_path = downloader.fetch_subtitles(
-                    project["url"], workdir, browser=opts.get("cookies_browser") or None,
-                    language=wanted,
-                )
-                if sub_path:
-                    segs = utils.parse_vtt(Path(sub_path))
-                    if segs and not transcribe.subtitle_script_mismatch(segs, wanted):
-                        transcript = {"language": wanted, "duration": duration, "segments": segs,
-                                      "engine": "source-subtitles"}
+            if project["url"].startswith(("https://", "http://")):
+                # При language="auto" (wanted == "") пробуем основные языки (ru, en)
+                # с проверкой алфавита, чтобы не подхватить автоперевод на чужой язык.
+                fallback_langs = [wanted] if wanted else ["ru", "en"]
+                for lang_code in fallback_langs:
+                    sub_path = downloader.fetch_subtitles(
+                        project["url"], workdir, browser=opts.get("cookies_browser") or None,
+                        language=lang_code,
+                    )
+                    if sub_path:
+                        segs = utils.parse_vtt(Path(sub_path))
+                        if segs and not transcribe.subtitle_script_mismatch(segs, lang_code):
+                            transcript = {"language": lang_code, "duration": duration, "segments": segs,
+                                          "engine": "source-subtitles"}
+                            break
             if transcript is None:
                 hint = " Проверьте аудиодорожку или выберите язык речи вручную." if not wanted else ""
                 raise RuntimeError("Не удалось распознать речь. " + str(exc)[:300] + hint) from exc
 
+        try:
+            (workdir / "transcript.json").write_text(
+                json.dumps(transcript.get("segments") or [], ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
         _update(pid, language=transcript.get("language"))
         db.merge_meta(pid, {
             "engine": transcript.get("engine"),
@@ -838,6 +870,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 font=settings.get("sub_font", "montserrat"),
                 position=settings.get("sub_position", "bottom"),
                 offset=int(settings.get("sub_offset", 0)),
+                free_pos=settings.get("sub_free"),
                 speed=settings.get("sub_speed", "calm"),
             )
             ass_path = staged / f"{clip['id']}.ass"
@@ -905,9 +938,11 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     if settings.get("segments"):
         raise RuntimeError("Клип собран в экономном режиме из фрагмента. Шаблон меняется до запуска нарезки.")
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
-                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_speed", "cut_pauses"):
+                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free", "sub_speed", "cut_pauses"):
         if key in payload and payload[key] is not None:
             settings[key] = payload[key]
+    if "sub_position" in payload and "sub_free" not in payload:
+        settings["sub_free"] = None
     start = float(payload.get("start", clip["start"]))
     end = float(payload.get("end", clip["end"]))
     if end - start < 3:
@@ -920,7 +955,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         from . import live
         # старые live-клипы хранили слова относительно окна эфира
         words = live._absolute_words(words, float(clip["start"]))
-    elif clip.get("path") or "audio_track" in payload:
+    elif clip.get("path") or "audio_track" in payload or (not words and settings.get("subtitles", True)):
         source = Path(project["source"])
         track_count = utils.probe(source)["audio_tracks"]
         track = payload.get("audio_track", opts["audio_track"])
@@ -930,7 +965,8 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         opts["audio_track"] = track
         # Старые клипы с несколькими дорожками не хранили, какую услышал Whisper.
         previous_track = settings.get("audio_track", 0 if track_count < 2 else None)
-        if track_count and track != previous_track:
+        needs_manual_asr = not clip.get("path") and not words and settings.get("subtitles", True) and not payload.get("text")
+        if track_count and (track != previous_track or needs_manual_asr):
             workdir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix=".asr-", dir=workdir) as scratch:
                 try:
@@ -1067,6 +1103,282 @@ def add_manual_clip(pid: str, start: float, end: float,
                        f"Вручную {int(start // 60)}:{int(start % 60):02d}", words, settings)
     from . import jobs as _jobs
 
-    db.update_project(pid, status="running", stage="Рендер клипа")
+    # Не переводим проект в "running" — submit_rerender обновляет только статус клипа,
+    # а клиентский isBusy() сам отслеживает клипы со статусом "rendering".
+    if project.get("status") == "review":
+        db.update_project(pid, status="done", progress=100, stage="Ручной клип", error=None)
     _jobs.submit_rerender(clip["id"], {})
     return clip
+
+
+# --- локальное открытие файла без копирования (улучшение 1) ------------------
+
+def create_local_project(path_str: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Создаёт проект по пути на диске без копирования файла через HTTP.
+
+    Если файл на том же диске, что и PROJECTS_DIR, создаётся жёсткая ссылка
+    (мгновенно и без дублирования места); при разных дисках используется
+    исходный путь напрямую.
+    """
+    raw = str(path_str or "").strip()
+    if not raw:
+        raise ValueError("Путь к файлу не указан")
+    src = Path(raw).expanduser().resolve()
+    if not src.is_file():
+        raise ValueError("Файл не найден на диске")
+    suffix = src.suffix.lower()
+    if suffix not in ALLOWED_MEDIA_SUFFIXES:
+        raise ValueError(f"Формат {suffix or '?'} не поддерживается — выберите видео или аудио")
+    if src.stat().st_size < 1024:
+        raise ValueError("Файл пустой или повреждён")
+    try:
+        probed = utils.probe(src)
+        if not probed.get("duration"):
+            raise ValueError("нет длительности")
+    except Exception:  # noqa: BLE001
+        raise ValueError("Файл не похож на видео или аудио — проверьте содержимое") from None
+
+    project = db.create_project("local:source", normalize_options(options), title=src.name)
+    workdir = PROJECTS_DIR / project["id"]
+    workdir.mkdir(parents=True, exist_ok=True)
+    target = workdir / f"source{suffix}"
+    source_path = src
+    meta: Dict[str, Any] = {"local_external": True}
+    try:
+        os.link(src, target)
+        source_path = target
+        meta = {"local_linked": True}
+    except OSError:
+        # Разные диски (например D:\video.mp4 и %APPDATA% на C:) — используем путь напрямую.
+        source_path = src
+        meta = {"local_external": True}
+    db.update_project(project["id"], source=str(source_path), title=src.name, meta=meta)
+    return db.get_project(project["id"]) or project
+
+
+# --- автопоиск камеры стримера (улучшение 3) ---------------------------------
+
+def detect_project_pip(pid: str) -> Dict[str, Any]:
+    """Ищет окно стримера на исходнике проекта и сохраняет координаты в options.pip."""
+    from . import pip as pip_mod
+
+    project = db.get_project(pid)
+    if not project:
+        raise KeyError("Проект не найден")
+    source = project.get("source")
+    if not source or not Path(source).is_file():
+        raise ValueError("Исходное видео недоступно для поиска камеры")
+    found = pip_mod.detect_facecam(Path(source))
+    options = dict(project.get("options") or {})
+    current = dict(options.get("pip") or {})
+    if found:
+        current["enabled"] = True
+        current["cam"] = {
+            "x": int(found["x"]),
+            "y": int(found["y"]),
+            "w": int(found["w"]),
+            "h": int(found["h"]),
+            "source": list(found.get("source") or []),
+        }
+        if found.get("corner"):
+            current["cam_corner"] = found["corner"]
+        options["pip"] = current
+        db.update_project(pid, options=options)
+    return {"found": bool(found), "cam": found, "pip": current}
+
+
+# --- удаление клипа и массовое применение стиля (улучшение 6) ----------------
+
+def delete_clip(cid: str) -> bool:
+    """Удаляет один клип из БД и стирает его артефакты на диске."""
+    clip = db.delete_clip(cid)
+    if not clip:
+        return False
+    pid = clip["project_id"]
+    workdir = PROJECTS_DIR / pid
+    candidates = [
+        Path(clip["path"]) if clip.get("path") else None,
+        Path(clip["thumb"]) if clip.get("thumb") else None,
+        workdir / "previews" / f"{cid}.mp4",
+        workdir / "subs" / f"{cid}.ass",
+    ]
+    for path in candidates:
+        if path is None:
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    remaining = len(db.list_clips(pid))
+    db.merge_meta(pid, {"clips": remaining})
+    return True
+
+
+def apply_style_to_project(pid: str, style: Dict[str, Any]) -> Dict[str, Any]:
+    """Применяет параметры оформления ко всем клипам проекта и ставит их в перерендер."""
+    project = db.get_project(pid)
+    if not project:
+        raise KeyError("Проект не найден")
+    patch = {k: style[k] for k in STYLE_KEYS if k in style and style[k] is not None}
+    if "sub_position" in patch and "sub_free" not in patch:
+        patch["sub_free"] = None
+    if not patch:
+        raise ValueError("Не указаны параметры оформления")
+    options = dict(project.get("options") or {})
+    options.update(patch)
+    db.update_project(pid, options=normalize_options(options))
+    clips = [c for c in db.list_clips(pid) if c.get("status") in ("ready", "error")]
+    if not clips:
+        raise ValueError("Нет клипов для пересборки")
+    from . import jobs as _jobs
+
+    queued = 0
+    for clip in clips:
+        if _jobs.submit_rerender(clip["id"], dict(patch)):
+            queued += 1
+    return {"ok": True, "clips": queued, "total": len(clips), "applied": patch}
+
+
+# --- управление местом на диске и очистка (улучшение 5) ----------------------
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _is_temp_project_file(path: Path) -> bool:
+    name = path.name.lower()
+    return (
+        name == "audio16k.wav"
+        or name.startswith("frame_") and name.endswith(".jpg")
+        or name.startswith("viralcut_") and name.endswith(".zip")
+        or name.startswith("probe_") and name.endswith(".wav")
+        or name.startswith("recheck_") and name.endswith(".wav")
+    )
+
+
+def storage_stats(data_dir: Optional[Path] = None,
+                  projects_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Считает объём данных ViralCut на диске по категориям."""
+    root = data_dir or DATA_DIR
+    proj_root = projects_dir or PROJECTS_DIR
+    projects = {p["id"]: p for p in db.list_projects(500)}
+    clips_bytes = 0
+    sources_bytes = 0
+    cleanable_sources_bytes = 0
+    temp_bytes = 0
+    projects_bytes = 0
+
+    if proj_root.exists():
+        for pdir in proj_root.iterdir():
+            if not pdir.is_dir():
+                continue
+            proj = projects.get(pdir.name)
+            done = bool(proj and proj.get("status") == "done")
+            for item in pdir.rglob("*"):
+                try:
+                    if not item.is_file():
+                        continue
+                    size = item.stat().st_size
+                except OSError:
+                    continue
+                projects_bytes += size
+                rel = item.relative_to(pdir)
+                top = rel.parts[0] if rel.parts else ""
+                if _is_temp_project_file(item) or top.startswith("whisper_chunks_"):
+                    temp_bytes += size
+                elif top in ("clips", "previews", "thumbs"):
+                    clips_bytes += size
+                elif len(rel.parts) == 1 and (item.name.startswith("source.") or item.name == "preview.mp4"):
+                    sources_bytes += size
+                    if done:
+                        cleanable_sources_bytes += size
+
+    models_bytes = _dir_size(root / "models") + _dir_size(root / "hf")
+    cache_bytes = _dir_size(root / "cache")
+    total_bytes = projects_bytes + models_bytes + cache_bytes
+    return {
+        "total_bytes": total_bytes,
+        "projects_bytes": projects_bytes,
+        "clips_bytes": clips_bytes,
+        "sources_bytes": sources_bytes,
+        "cleanable_sources_bytes": cleanable_sources_bytes,
+        "temp_bytes": temp_bytes,
+        "models_bytes": models_bytes,
+        "cache_bytes": cache_bytes,
+        "data_dir": str(root),
+    }
+
+
+def cleanup_storage(include_sources: bool = False,
+                    data_dir: Optional[Path] = None,
+                    projects_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Очищает временные файлы, кэш и (по желанию) исходники готовых проектов."""
+    root = data_dir or DATA_DIR
+    proj_root = projects_dir or PROJECTS_DIR
+    active_statuses = {"queued", "running", "preparing", "processing"}
+    projects = {p["id"]: p for p in db.list_projects(500)}
+    freed = 0
+    removed = 0
+
+    def _unlink(p: Path) -> None:
+        nonlocal freed, removed
+        try:
+            size = p.stat().st_size if p.is_file() else 0
+            p.unlink(missing_ok=True)
+            freed += size
+            removed += 1
+        except OSError:
+            pass
+
+    if proj_root.exists():
+        for pdir in proj_root.iterdir():
+            if not pdir.is_dir():
+                continue
+            proj = projects.get(pdir.name)
+            if proj and proj.get("status") in active_statuses:
+                continue
+            for chunk_dir in list(pdir.glob("whisper_chunks_*")):
+                if chunk_dir.is_dir():
+                    freed += _dir_size(chunk_dir)
+                    shutil.rmtree(chunk_dir, ignore_errors=True)
+                    removed += 1
+            for item in list(pdir.iterdir()):
+                if item.is_file() and _is_temp_project_file(item):
+                    _unlink(item)
+            if include_sources and proj and proj.get("status") == "done":
+                source_removed = False
+                for item in list(pdir.iterdir()):
+                    if item.is_file() and (item.name.startswith("source.") or item.name == "preview.mp4"):
+                        _unlink(item)
+                        source_removed = True
+                if source_removed:
+                    # Если исходник лежал внутри папки проекта — обнуляем ссылку, клипы остаются!
+                    full_proj = db.get_project(proj["id"]) or {}
+                    src_str = full_proj.get("source") or ""
+                    try:
+                        if src_str and Path(src_str).resolve().is_relative_to(pdir.resolve()):
+                            db.update_project(proj["id"], source=None)
+                    except Exception:
+                        pass
+
+    pip_cache = root / "cache" / "pip"
+    if pip_cache.is_dir():
+        freed += _dir_size(pip_cache)
+        shutil.rmtree(pip_cache, ignore_errors=True)
+        removed += 1
+
+    return {
+        "ok": True,
+        "freed_bytes": freed,
+        "removed_files": removed,
+        "storage": storage_stats(data_dir=root, projects_dir=proj_root),
+    }

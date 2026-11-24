@@ -248,6 +248,7 @@ const state = {
   tmplTimer: null,
   tmplAnim: null,
   tmplDetail: null,
+  tmplFreePos: null,
   opts: {
     count: 10,
     dur: "20-45",
@@ -575,7 +576,20 @@ function bindHero() {
   const urlInput = $("#urlInput");
   if (urlInput) urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submitLink(); });
   const uploadBtn = $("#uploadBtn");
-  if (uploadBtn) uploadBtn.addEventListener("click", () => $("#fileInput").click());
+  if (uploadBtn) uploadBtn.addEventListener("click", async () => {
+    const native = window.pywebview && window.pywebview.api && window.pywebview.api.choose_media_file;
+    if (native) {
+      try {
+        const res = await native();
+        if (res && res.ok && res.path) {
+          await openLocalFile(res.path);
+          return;
+        }
+        if (res && res.cancelled) return;
+      } catch (e) { console.error(e); }
+    }
+    $("#fileInput").click();
+  });
 }
 
 function aiModeHint() {
@@ -772,9 +786,30 @@ async function createFromProbe(height) {
   }
 }
 
+async function openLocalFile(path) {
+  if (!path) return;
+  toast("Открываю локальный файл…");
+  try {
+    const project = await api("/api/projects/local", {
+      method: "POST",
+      body: JSON.stringify({ path, options: heroOptions() })
+    });
+    await loadProjects();
+    openProject(project.id);
+    openTemplate(project.id);
+  } catch (e) {
+    toast(e.message || "Не удалось открыть файл", "err");
+  }
+}
+
 async function uploadFile(file) {
   if (!file) return;
-  if (file.size > 4 * 1024 * 1024 * 1024) { toast("Файл больше 4 ГБ", "err"); return; }
+  const maxBytes = (state.health && state.health.max_upload_bytes) || (64 * 1024 * 1024 * 1024);
+  if (file.size > maxBytes) {
+    const maxGb = Math.round(maxBytes / (1024 * 1024 * 1024));
+    toast(`Файл больше ${maxGb} ГБ`, "err");
+    return;
+  }
   const form = new FormData();
   form.append("file", file);
   form.append("options", JSON.stringify(heroOptions()));
@@ -1000,11 +1035,16 @@ function clipsGridHTML() {
     ].filter(([k, v]) => typeof v === "number" && (v > 0.02 || !["реакция", "монтаж"].includes(k)))
       .map(([k, v]) => `<span>${k} ${Math.round(v * 100)}</span>`).join("") : "";
     if (c.status === "error") {
-      return `<div class="clip-card${wide}">
+      return `<div class="clip-card${wide}" data-clip="${c.id}">
         <div class="clip-media" style="display:grid;place-items:center;padding:16px;text-align:center">
           <div style="font-size:12px;color:#fca5a5;line-height:1.45">Не удалось отрендерить<br>${esc((c.error || "").slice(0, 90))}</div>
         </div>
-        <div class="clip-body"><div class="clip-title">${esc(c.title || "Клип")}</div></div>
+        <div class="clip-body">
+          <div class="clip-title">${esc(c.title || "Клип")}</div>
+          <div class="clip-tools">
+            <button class="glass-btn danger" data-action="delete-clip" title="Удалить клип" aria-label="Удалить клип">${ICONS.trash}</button>
+          </div>
+        </div>
       </div>`;
     }
     if (c.status !== "ready") {
@@ -1031,6 +1071,7 @@ function clipsGridHTML() {
           <a class="srt-btn" href="/api/clips/${c.id}/subtitles.srt" download title="Скачать субтитры (SRT)">SRT</a>
           <button class="glass-btn" data-action="copy" title="Копировать подпись" aria-label="Копировать подпись">${ICONS.copy}</button>
           ${c.settings?.segments ? "" : `<button class="glass-btn" data-action="edit" title="Редактировать клип" aria-label="Редактировать клип">${ICONS.edit}</button>`}
+          <button class="glass-btn danger" data-action="delete-clip" title="Удалить клип" aria-label="Удалить клип">${ICONS.trash}</button>
         </div>
       </div>
     </div>`;
@@ -1485,6 +1526,21 @@ $("#main").addEventListener("click", async (e) => {
     return;
   }
 
+  if (action === "delete-clip" && clipId) {
+    if (!confirm("Удалить этот клип? Файл клипа будет стёрт с диска.")) return;
+    try {
+      await api(`/api/clips/${clipId}`, { method: "DELETE" });
+      if (state.detail) {
+        state.detail.clips = state.detail.clips.filter((c) => c.id !== clipId);
+        state.mainKey = "";
+        renderMain(true);
+      }
+      loadProjects();
+      toast("Клип удалён");
+    } catch (err) { toast(err.message, "err"); }
+    return;
+  }
+
   if (action === "edit" && clipId) {
     openEditor(clipId);
   }
@@ -1502,7 +1558,8 @@ function templateDefaults(project) {
     speed: o.sub_speed || "calm",
     accent: o.accent || "yellow",
     uppercase: o.uppercase !== false,
-    showHook: o.show_hook !== false
+    showHook: o.show_hook !== false,
+    freePos: Array.isArray(o.sub_free) && o.sub_free.length >= 2 ? [Number(o.sub_free[0]), Number(o.sub_free[1])] : null
   };
 }
 
@@ -1514,6 +1571,7 @@ function templateOptions() {
     sub_size: Number($("#tpSize").value),
     sub_position: $("#tpPos").value,
     sub_offset: Number($("#tpOffset").value),
+    sub_free: state.tmplFreePos ? [...state.tmplFreePos] : null,
     sub_speed: ($("#tpSpeed .active") || {}).dataset?.val || "calm",
     accent: state.tmplAccent,
     uppercase: $("#tpUpper").checked,
@@ -1538,19 +1596,35 @@ function updateTemplatePreview() {
   cap.style.textTransform = upper ? "uppercase" : "none";
   cap.style.setProperty("--hl", ACCENT_HEX[accent] || ACCENT_HEX.yellow);
   const offsetPct = (offset / 1920) * 100;
-  cap.style.transform = "";
-  if (pos === "top") {
-    cap.style.top = `calc(${13.5 - offsetPct}% )`;
+  const resetBtn = $("#tpFreeReset");
+  if (Array.isArray(state.tmplFreePos) && state.tmplFreePos.length >= 2) {
+    const [fx, fy] = state.tmplFreePos;
+    cap.style.left = `${(fx * 100).toFixed(2)}%`;
+    cap.style.right = "auto";
+    cap.style.width = "88%";
+    cap.style.top = `${(fy * 100).toFixed(2)}%`;
     cap.style.bottom = "auto";
-    cap.style.transform = "translateY(0)";
-  } else if (pos === "middle") {
-    cap.style.top = `calc(${50 - offsetPct}%)`;
-    cap.style.bottom = "auto";
-    cap.style.transform = "translateY(-50%)";
+    cap.style.transform = "translate(-50%, -50%)";
+    if (resetBtn) resetBtn.hidden = false;
   } else {
-    cap.style.top = "auto";
-    cap.style.bottom = `calc(${17.7 + offsetPct}%)`;
+    cap.style.left = "6%";
+    cap.style.right = "6%";
+    cap.style.width = "auto";
     cap.style.transform = "";
+    if (pos === "top") {
+      cap.style.top = `calc(${13.5 - offsetPct}% )`;
+      cap.style.bottom = "auto";
+      cap.style.transform = "translateY(0)";
+    } else if (pos === "middle") {
+      cap.style.top = `calc(${50 - offsetPct}%)`;
+      cap.style.bottom = "auto";
+      cap.style.transform = "translateY(-50%)";
+    } else {
+      cap.style.top = "auto";
+      cap.style.bottom = `calc(${17.7 + offsetPct}%)`;
+      cap.style.transform = "";
+    }
+    if (resetBtn) resetBtn.hidden = true;
   }
   $("#tpSizeVal").textContent = size;
   $("#tpOffsetVal").textContent = offset;
@@ -1581,6 +1655,7 @@ function applyPreset(key) {
   $("#tpSize").value = t.subSize;
   $("#tpPos").value = t.subPos;
   $("#tpOffset").value = t.subOffset;
+  state.tmplFreePos = null;
   state.tmplAccent = t.accent;
   $("#tpUpper").checked = t.uppercase;
   $$("#tpAccents .swatch").forEach((b) => b.classList.toggle("active", b.dataset.val === t.accent));
@@ -1594,6 +1669,7 @@ function closeTemplate(keepProject) {
   state.tmplAnim = null;
   state.tmplPid = null;
   state.tmplDetail = null;
+  state.tmplFreePos = null;
   $("#modal").classList.add("hidden");
   $("#modal").innerHTML = "";
   if (!keepProject) renderSidebar();
@@ -1604,6 +1680,7 @@ function openTemplate(pid) {
   clearTimeout(state.tmplTimer);
   state.tmplPid = pid;
   state.tmplDetail = null;
+  state.tmplFreePos = null;
   clearInterval(state.tmplAnim);
   state.tmplAccent = "yellow";
   state.tmplReady = false;
@@ -1620,14 +1697,14 @@ function openTemplate(pid) {
           <div class="preview-heading"><b>Предпросмотр</b><span>9:16</span></div>
           <div class="tmpl-stage" id="tmplStage">
             <video id="tmplVideo" muted loop playsinline controls aria-label="Предпросмотр субтитров"></video>
-            <div class="tmpl-caption" id="tmplCaption"><span class="w hl">ПРИМЕР</span> <span class="w">СУБТИТРОВ</span></div>
+            <div class="tmpl-caption" id="tmplCaption" title="Перетащите субтитры в нужное место"><span class="w hl">ПРИМЕР</span> <span class="w">СУБТИТРОВ</span></div>
             <div class="tmpl-veil" id="tmplVeil">
               <span class="spinner"></span>
               <div id="tmplStageText">Загрузка видео…</div>
               <div class="tmpl-bar"><i id="tmplBar" style="width:2%"></i></div>
             </div>
           </div>
-          <div class="tmpl-hint">Так будет выглядеть вертикальный кадр. Видео можно поставить на паузу.</div>
+          <div class="tmpl-hint">Субтитры можно перетащить мышью в любое место кадра. <button type="button" class="link-btn" id="tpFreeReset" hidden>Сбросить позицию</button></div>
         </div>
         <div class="tmpl-right">
           <div class="form-card field">
@@ -1713,8 +1790,38 @@ function openTemplate(pid) {
     startCaptionPreview();
   });
   $("#tpSize").addEventListener("input", updateTemplatePreview);
-  $("#tpPos").addEventListener("change", updateTemplatePreview);
-  $("#tpOffset").addEventListener("input", updateTemplatePreview);
+  $("#tpPos").addEventListener("change", () => { state.tmplFreePos = null; updateTemplatePreview(); });
+  $("#tpOffset").addEventListener("input", () => { state.tmplFreePos = null; updateTemplatePreview(); });
+  $("#tpFreeReset")?.addEventListener("click", () => { state.tmplFreePos = null; updateTemplatePreview(); });
+  const tmplCap = $("#tmplCaption");
+  const tmplStage = $("#tmplStage");
+  if (tmplCap && tmplStage) {
+    let dragging = false;
+    const moveTo = (ev) => {
+      const rect = tmplStage.getBoundingClientRect();
+      if (!rect.width || !rect.height) return;
+      const fx = Math.max(0.12, Math.min(0.88, (ev.clientX - rect.left) / rect.width));
+      const fy = Math.max(0.08, Math.min(0.92, (ev.clientY - rect.top) / rect.height));
+      state.tmplFreePos = [Number(fx.toFixed(4)), Number(fy.toFixed(4))];
+      updateTemplatePreview();
+    };
+    tmplCap.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      dragging = true;
+      tmplCap.classList.add("dragging");
+      try { tmplCap.setPointerCapture(ev.pointerId); } catch (_) {}
+      moveTo(ev);
+    });
+    tmplCap.addEventListener("pointermove", (ev) => { if (dragging) moveTo(ev); });
+    const stopDrag = (ev) => {
+      if (!dragging) return;
+      dragging = false;
+      tmplCap.classList.remove("dragging");
+      try { tmplCap.releasePointerCapture(ev.pointerId); } catch (_) {}
+    };
+    tmplCap.addEventListener("pointerup", stopDrag);
+    tmplCap.addEventListener("pointercancel", stopDrag);
+  }
   $("#tpUpper").addEventListener("change", updateTemplatePreview);
   $("#tpAccents").addEventListener("click", (e) => {
     const b = e.target.closest(".swatch");
@@ -1769,6 +1876,7 @@ async function tmplPoll() {
       $("#tpHook").checked = defaults.showHook;
       $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.speed));
       state.tmplAccent = defaults.accent;
+      state.tmplFreePos = defaults.freePos;
       $$("#tpAccents .swatch").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.accent));
       updateTemplatePreview();
 
@@ -1990,6 +2098,7 @@ function openEditor(clipId) {
       </div>
       <div class="modal-foot">
         <button class="btn-ghost" data-close>Отмена</button>
+        <button class="btn-ghost" id="edApplyAll" type="button" title="Применить оформление и формат ко всем клипам проекта">Ко всем клипам</button>
         <button class="btn-primary" id="edSave">Перерендерить</button>
       </div>
     </div>`;
@@ -2032,7 +2141,8 @@ function openEditor(clipId) {
   start.addEventListener("input", () => {
     if (Number(start.value) > Number(end.value) - 3) start.value = Math.max(0, Number(end.value) - 3);
     syncNumbers();
-    try { video.currentTime = Number(start.value); } catch (_) {}
+    const rel = Math.max(0, Number(start.value) - Number(clip.start || 0));
+    try { video.currentTime = Number.isFinite(video.duration) ? Math.min(video.duration, rel) : rel; } catch (_) {}
   });
   end.addEventListener("input", () => {
     if (Number(end.value) < Number(start.value) + 3) end.value = Math.min(maxT, Number(start.value) + 3);
@@ -2079,6 +2189,38 @@ function openEditor(clipId) {
       toast(e.message, "err");
       btn.disabled = false;
       btn.textContent = "Перерендерить";
+    }
+  });
+
+  $("#edApplyAll")?.addEventListener("click", async () => {
+    const btn = $("#edApplyAll");
+    btn.disabled = true;
+    const stylePayload = {
+      aspect: $("#edAspect").value,
+      mode: $("#edMode").value,
+      subtitles: $("#edSubs").checked,
+      uppercase: $("#edUpper").checked,
+      show_hook: $("#edShowHook").checked,
+      cut_pauses: $("#edCutPauses").checked,
+      accent: chosenAccent,
+      sub_font: $("#edFont").value,
+      sub_size: Number($("#edSize").value),
+      sub_position: $("#edPos").value,
+      sub_offset: Number($("#edOffset").value),
+      sub_speed: ($("#edSpeed .active") || {}).dataset?.val || "calm"
+    };
+    try {
+      const res = await api(`/api/projects/${project.id}/style/apply`, {
+        method: "POST",
+        body: JSON.stringify(stylePayload)
+      });
+      closeModal();
+      toast(`Оформление применено — пересобираю клипов: ${res.clips}`);
+      await loadDetail(true);
+      schedulePoll(900);
+    } catch (e) {
+      toast(e.message, "err");
+      btn.disabled = false;
     }
   });
 }
@@ -2381,11 +2523,12 @@ function gpuPreferenceHint(preference) {
   return "Система решает сама: обычно встроенная карта, пока не нужна дискретная.";
 }
 
-const AI_PROVIDER_ORDER = ["deepseek", "polza", "openai", "custom"];
+const AI_PROVIDER_ORDER = ["deepseek", "polza", "openai", "local", "custom"];
 const AI_FALLBACK_MODELS = {
   deepseek: ["deepseek-chat", "deepseek-reasoner"],
   polza: ["openai/gpt-4o-mini", "openai/gpt-4o", "deepseek/deepseek-chat"],
   openai: ["gpt-4o-mini", "gpt-4o"],
+  local: ["qwen2.5"],
   custom: [],
 };
 
@@ -2398,8 +2541,15 @@ function aiProviderButtons(current, providers) {
 }
 
 function aiProviderHint(conf) {
-  const note = conf.ai && conf.ai.note ? `${esc(conf.ai.note)} ` : "";
-  if ((conf.ai_provider || "deepseek") === "custom") {
+  const key = conf.ai_provider || "deepseek";
+  const providers = (conf.ai && conf.ai.providers) || [];
+  const match = providers.find((p) => p.key === key);
+  const rawNote = match ? (match.note || "") : (key === conf.ai?.provider ? (conf.ai?.note || "") : "");
+  const note = rawNote ? `${rawNote} ` : "";
+  if (key === "local" || (match && match.keyless)) {
+    return `${note}Ключ не требуется — запросы идут на локальный сервер (Ollama или LM Studio).`;
+  }
+  if (key === "custom") {
     return `${note}Укажите базовый URL OpenAI-совместимого сервера, например http://127.0.0.1:11434/v1.`;
   }
   return `${note}Запросы уходят с вашим ключом напрямую провайдеру. Без ключа кнопка «Совет ИИ» не работает.`;
@@ -2761,7 +2911,7 @@ async function openSettings() {
           <div class="set-seg" id="setAiProvider">
             ${aiProviderButtons(conf.ai_provider || "deepseek", conf.ai && conf.ai.providers)}
           </div>
-          <div class="set-hint" id="setAiProviderHint">${aiProviderHint(conf)}</div>
+          <div class="set-hint" id="setAiProviderHint">${esc(aiProviderHint(conf))}</div>
           <label class="set-label" for="setAiBase">Адрес API (для своей модели)</label>
           <input type="text" id="setAiBase" class="set-input" spellcheck="false"
                  placeholder="http://127.0.0.1:11434/v1" value="${esc(conf.ai && conf.ai.base ? conf.ai.base : "")}" />
@@ -2774,8 +2924,11 @@ async function openSettings() {
           </div>
           <div class="set-hint" id="setAiModelHint"></div>
           <label class="set-label" for="setAiKey" id="setAiKeyLabel">API-ключ</label>
-          <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
-                 placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
+          <div class="set-row">
+            <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
+                   placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
+            <button class="btn-ghost danger" type="button" id="setAiKeyClear" ${conf.ai_key_set ? "" : "hidden"}>Удалить ключ</button>
+          </div>
           <div class="set-hint" id="setAiKeyStatus" aria-live="polite"></div>
           <div class="set-row">
             <button class="btn-ghost" type="button" id="setLocalDetect">Найти локальный сервер</button>
@@ -2807,6 +2960,14 @@ async function openSettings() {
           <pre id="setCheckOut" class="diag-out hidden"></pre>
         </div>
         <div class="form-card set-section">
+          <h4>Диск и кэш</h4>
+          <div class="set-hint" id="setStorageInfo">Считаю объём данных…</div>
+          <div class="set-row">
+            <button class="btn-ghost" type="button" id="setCleanTemp">Очистить временные файлы</button>
+            <button class="btn-ghost danger" type="button" id="setCleanSources">Удалить исходники готовых проектов</button>
+          </div>
+        </div>
+        <div class="form-card set-section">
           <h4>Журнал приложения</h4>
           <div class="settings-log">
             <div class="set-hint">Показывает, на каком этапе произошла ошибка.</div>
@@ -2821,6 +2982,40 @@ async function openSettings() {
       </div>
     </div>`;
   $("#modal").classList.remove("hidden");
+  const fmtBytes = (bytes) => {
+    const b = Math.max(0, Number(bytes) || 0);
+    if (b >= 1024 ** 3) return `${(b / (1024 ** 3)).toFixed(2).replace(".", ",")} ГБ`;
+    if (b >= 1024 ** 2) return `${Math.round(b / (1024 ** 2))} МБ`;
+    if (b >= 1024) return `${Math.round(b / 1024)} КБ`;
+    return `${b} Б`;
+  };
+  const renderStorage = (st) => {
+    const info = $("#setStorageInfo");
+    if (!info || !st) return;
+    info.textContent = `Всего: ${fmtBytes(st.total_bytes)} · клипы: ${fmtBytes(st.clips_bytes)} · исходники: ${fmtBytes(st.sources_bytes)} (можно очистить: ${fmtBytes(st.cleanable_sources_bytes)}) · временные и кэш: ${fmtBytes((st.temp_bytes || 0) + (st.cache_bytes || 0))}`;
+  };
+  api("/api/storage").then(renderStorage).catch(() => {
+    const info = $("#setStorageInfo");
+    if (info) info.textContent = "Не удалось посчитать занятое место.";
+  });
+  const runCleanup = async (includeSources, btn) => {
+    if (includeSources && !confirm("Удалить скачанные исходники готовых проектов? Готовые клипы MP4 сохранятся, но перерендер с другими границами станет недоступен.")) return;
+    if (btn) btn.disabled = true;
+    try {
+      const res = await api("/api/storage/cleanup", {
+        method: "POST",
+        body: JSON.stringify({ include_sources: includeSources })
+      });
+      renderStorage(res.storage);
+      toast(`Освобождено: ${fmtBytes(res.freed_bytes)}`);
+    } catch (err) {
+      toast(err.message, "err");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  };
+  $("#setCleanTemp")?.addEventListener("click", (e) => runCleanup(false, e.currentTarget));
+  $("#setCleanSources")?.addEventListener("click", (e) => runCleanup(true, e.currentTarget));
   const diagBtn = $("#setDiag");
   if (diagBtn) diagBtn.addEventListener("click", async () => {
     const out = $("#setDiagOut");
@@ -2853,19 +3048,32 @@ async function openSettings() {
   window.__aiProviders = (conf.ai && conf.ai.providers) || null;
   window.__aiProvider = conf.ai_provider || "deepseek";
   let aiProvider = conf.ai_provider || "deepseek";
+  let clearAiKey = false;
   const syncAiKey = () => {
     const provider = conf.ai?.providers?.find(p => p.key === aiProvider);
     const input = $("#setAiKey");
+    const clearBtn = $("#setAiKeyClear");
     const local = aiProvider === "local";
-    const saved = aiProvider === conf.ai_provider && conf.ai_key_set &&
+    const saved = !clearAiKey && aiProvider === conf.ai_provider && conf.ai_key_set &&
       $("#setAiBase").value.trim().replace(/\/+$/, "") === (conf.ai?.base || "");
     $("#setAiKeyLabel").textContent = provider ? `API-ключ · ${provider.label}` : "API-ключ";
     input.disabled = local;
     input.placeholder = saved ? "Введите новый ключ для замены" : "Вставьте API-ключ";
+    if (clearBtn) clearBtn.hidden = local || !saved;
     $("#setAiKeyStatus").textContent = local ? "Для локальной модели ключ не нужен."
+      : clearAiKey ? "Ключ будет удалён при сохранении настроек."
       : saved ? "Ключ сохранён на этом компьютере."
       : "При сохранении новый ключ заменит предыдущий.";
   };
+  $("#setAiKeyClear")?.addEventListener("click", () => {
+    clearAiKey = true;
+    $("#setAiKey").value = "";
+    syncAiKey();
+  });
+  $("#setAiKey")?.addEventListener("input", () => {
+    if ($("#setAiKey").value.trim()) clearAiKey = false;
+    syncAiKey();
+  });
   $("#setAiBase").addEventListener("input", syncAiKey);
   syncAiKey();
   $$("#setAiProvider button").forEach((b) => b.addEventListener("click", () => {
@@ -2987,9 +3195,11 @@ async function openSettings() {
       };
       // пустое поле = «не менять ключ», иначе сохранение стирало бы его
       const aiKey = ($("#setAiKey")?.value || "").trim();
-      if (aiKey && aiProvider !== "local") payload.ai_key = aiKey;
+      if (clearAiKey && !aiKey) payload.clear_ai_key = true;
+      else if (aiKey && aiProvider !== "local") payload.ai_key = aiKey;
       const saved = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
       closeModal();
+      loadAiStatus();
       if (saved.encoder_warning) toast(saved.encoder_warning, "err");
       else toast("Настройки сохранены");
       pollSystem();
@@ -3108,7 +3318,7 @@ function pipCardHTML(detail) {
   const project = detail.project;
   if (!project) return "";
   const conf = (project.options && project.options.pip) || {};
-  const on = conf.enabled !== false;
+  const on = Boolean(conf.enabled);
   const pos = conf.pos || [0.72, 0.78];
   const corner = conf.cam_corner || "bottom-right";
   const corners = [["top-left", "↖"], ["top-right", "↗"], ["bottom-left", "↙"], ["bottom-right", "↘"]];
@@ -3121,6 +3331,12 @@ function pipCardHTML(detail) {
       slots.push(`<button class="pip-slot ${active ? "active" : ""}" data-x="${x}" data-y="${y}" type="button" aria-label="окно ${col},${row}"></button>`);
     }
   }
+  const frameT = Math.max(1, Math.round((project.duration || 10) * 0.2));
+  const previewBlock = project.source ? `
+      <div class="pip-preview" id="pipPreview">
+        <img id="pipFrameImg" src="/api/projects/${esc(project.id)}/frame.jpg?t=${frameT}&width=640" alt="Кадр исходника" loading="lazy" />
+        <div class="pip-cam-box" id="pipCamBox"></div>
+      </div>` : "";
   return `
     <div class="pip-card" id="pipCard">
       <div class="pip-head">
@@ -3130,6 +3346,7 @@ function pipCardHTML(detail) {
         </div>
         <label class="toggle"><input type="checkbox" id="pipToggle" ${on ? "checked" : ""}/><span class="track"></span></label>
       </div>
+      ${previewBlock}
       <div class="pip-grid">
         <div class="pip-block">
           <div class="pip-label">Камера в кадре</div>
@@ -3150,6 +3367,7 @@ function pipCardHTML(detail) {
         </div>
       </div>
       <div class="pip-controls">
+        ${project.source ? `<button class="btn-ghost" id="pipDetect" type="button">Найти камеру</button>` : ""}
         <button class="btn-primary" id="pipApply" type="button">Применить</button>
         <button class="btn-ghost" id="pipRebuild" type="button">Пересобрать с окном</button>
       </div>
@@ -3162,37 +3380,88 @@ async function initPip(detail) {
   const project = detail.project;
   let conf = (project.options && project.options.pip) || {};
   conf = {
-    enabled: conf.enabled !== false,
+    enabled: Boolean(conf.enabled),
     pos: conf.pos || [0.72, 0.78],
+    cam: conf.cam || null,
     cam_corner: conf.cam_corner || "bottom-right",
     size: conf.size || 0.28,
     radius: conf.radius || 20,
   };
 
+  function updatePipBox() {
+    const box = $("#pipCamBox");
+    if (!box) return;
+    if (conf.cam && conf.cam.w && conf.cam.h && Array.isArray(conf.cam.source) && conf.cam.source[0] && conf.cam.source[1]) {
+      const [sw, sh] = conf.cam.source;
+      box.style.left = `${(conf.cam.x / sw) * 100}%`;
+      box.style.top = `${(conf.cam.y / sh) * 100}%`;
+      box.style.width = `${(conf.cam.w / sw) * 100}%`;
+      box.style.height = `${(conf.cam.h / sh) * 100}%`;
+      return;
+    }
+    const share = 28;
+    const isRight = String(conf.cam_corner || "bottom-right").includes("right");
+    const isBottom = String(conf.cam_corner || "bottom-right").includes("bottom");
+    box.style.left = isRight ? `${100 - share}%` : "0%";
+    box.style.top = isBottom ? `${100 - share}%` : "0%";
+    box.style.width = `${share}%`;
+    box.style.height = `${share}%`;
+  }
+
   async function savePip() {
     try {
+      const payload = {
+        enabled: conf.enabled,
+        pos: conf.pos,
+        size: conf.size,
+        radius: conf.radius,
+      };
+      if (conf.cam) payload.cam = conf.cam;
+      else payload.cam_corner = conf.cam_corner;
       await api(`/api/projects/${project.id}/pip`, {
         method: "POST",
-        body: JSON.stringify({
-          enabled: conf.enabled,
-          pos: conf.pos,
-          cam_corner: conf.cam_corner,
-          size: conf.size,
-          radius: conf.radius,
-        }),
+        body: JSON.stringify(payload),
       });
     } catch (e) { console.error("pip save", e); }
   }
 
+  updatePipBox();
   $("#pipToggle").checked = conf.enabled;
   $("#pipToggle").addEventListener("change", () => { conf.enabled = $("#pipToggle").checked; savePip(); });
 
   $("#pipCamCorner").addEventListener("click", (e) => {
     const btn = e.target.closest(".pip-corner");
     if (!btn) return;
+    conf.cam = null;
     conf.cam_corner = btn.dataset.corner;
     $$("#pipCamCorner .pip-corner").forEach((b) => b.classList.toggle("active", b === btn));
+    updatePipBox();
     savePip();
+  });
+
+  $("#pipDetect")?.addEventListener("click", async () => {
+    const btn = $("#pipDetect");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Ищу…';
+    try {
+      const res = await api(`/api/projects/${project.id}/pip/detect`, { method: "POST", body: JSON.stringify({}) });
+      if (res.found && res.cam) {
+        conf.enabled = true;
+        conf.cam = res.cam;
+        if (res.cam.corner) conf.cam_corner = res.cam.corner;
+        $("#pipToggle").checked = true;
+        $$("#pipCamCorner .pip-corner").forEach((b) => b.classList.toggle("active", b.dataset.corner === conf.cam_corner));
+        updatePipBox();
+        toast("Камера стримера найдена");
+      } else {
+        toast("Камера не найдена — выберите угол вручную", "err");
+      }
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Найти камеру";
+    }
   });
 
   $("#pipSlots").addEventListener("click", (e) => {

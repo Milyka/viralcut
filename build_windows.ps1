@@ -1,4 +1,4 @@
-# Сборка ViralCut для Windows 10/11 (x64) в один exe-каталог + ZIP.
+﻿# Сборка ViralCut для Windows 10/11 (x64) в один exe-каталог + ZIP.
 # Запуск:  powershell -ExecutionPolicy Bypass -File build_windows.ps1
 param(
     # Пусто — версия берётся из viralcut/_version.py (единый источник истины).
@@ -13,9 +13,11 @@ Write-Host "[ViralCut] Python..." -ForegroundColor Cyan
 $py = $null
 foreach ($candidate in @("py -3.12", "python")) {
     try {
-        & cmd /c "$candidate -c `"import sys; print(sys.version)`"" | Out-Null
-        $py = $candidate
-        break
+        & cmd /c "$candidate -c `"import sys; assert sys.version_info >= (3, 11)`"" *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $py = $candidate
+            break
+        }
     } catch { }
 }
 if (-not $py) { throw "Не найден Python 3.12. Установите с https://www.python.org/downloads/windows/" }

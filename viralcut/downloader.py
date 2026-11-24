@@ -178,6 +178,129 @@ def _pot_enabled() -> bool:
     return bool(os.environ.get("VIRALCUT_POT_URL") and os.environ.get("VIRALCUT_NODE"))
 
 
+def _norm_lang(code: Optional[str]) -> str:
+    raw = (code or "").strip().lower().replace("_", "-")
+    if raw in ("", "auto", "und", "none"):
+        return ""
+    return raw
+
+
+def _lang_matches(track_lang: Optional[str], wanted: str) -> bool:
+    tl = _norm_lang(track_lang)
+    wl = _norm_lang(wanted)
+    if not tl or not wl:
+        return False
+    return tl == wl or tl.split("-", 1)[0] == wl.split("-", 1)[0]
+
+
+def _is_original_audio(f: Dict[str, Any]) -> bool:
+    if int(f.get("language_preference") or 0) > 0:
+        return True
+    note = (f.get("format_note") or "").lower()
+    return "original" in note or "(default)" in note
+
+
+def _pick_audio(audios: List[Dict[str, Any]], language: Optional[str] = None,
+                video_lang: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Выбирает нужную аудиодорожку без случайного автодубляжа YouTube.
+
+    У многоязычных роликов YouTube отдаёт 10–25 дорожек с разными языками,
+    причём у оригинала `language_preference=10` и пометка `original (default)`,
+    а у автодубляжей `language_preference=-1`. Если выбирать только по битрейту,
+    легко скачать случайный дубляж (например, малаялам) вместо английского.
+    """
+    if not audios:
+        return None
+    wanted = _norm_lang(language)
+    vlang = _norm_lang(video_lang)
+
+    def rank(f: Dict[str, Any]) -> tuple:
+        f_lang = _norm_lang(f.get("language"))
+        pref = int(f.get("language_preference") or 0)
+        orig = 1 if _is_original_audio(f) else 0
+        m4a = 1 if f.get("ext") == "m4a" else 0
+        abr = float(f.get("abr") or f.get("tbr") or 0)
+        if wanted:
+            matched = 1 if _lang_matches(f_lang, wanted) else 0
+            exact = 1 if (matched and f_lang == wanted) else 0
+            return (matched, orig, pref, exact, m4a, abr)
+        # Авто-язык: всегда предпочитаем оригинальную дорожку ролика, а не автодубляж.
+        return (
+            pref,
+            orig,
+            1 if (vlang and _lang_matches(f_lang, vlang)) else 0,
+            m4a,
+            abr,
+        )
+
+    return max(audios, key=rank)
+
+
+def _audio_selector_variants(language: Optional[str]) -> List[str]:
+    """Цепочка приоритетов для строковых селекторов yt-dlp (резервный путь)."""
+    wanted = _norm_lang(language)
+    base = wanted.split("-", 1)[0] if wanted else ""
+    out: List[str] = []
+    if base and re.fullmatch(r"[a-z]{2,3}", base):
+        out.append(f"ba[ext=m4a][language^={base}][format_note*=original]")
+        out.append(f"ba[language^={base}][format_note*=original]")
+        out.append(f"ba[ext=m4a][language^={base}]")
+        out.append(f"ba[language^={base}]")
+    out.append("ba[ext=m4a][format_note*=original]")
+    out.append("ba[format_note*=original]")
+    out.append("ba[ext=m4a]")
+    out.append("ba")
+    return out
+
+
+def _hd_format_selector(max_height: int, language: Optional[str] = None) -> str:
+    if max_height <= 360:
+        return FORMAT_SD
+    audio_opts = _audio_selector_variants(language)
+    parts: List[str] = []
+    # width-варианты нужны для вертикальных видео (Shorts, Twitter): у них
+    # «height» — длинная сторона, и фильтр height<=1080 отбрасывает 1080p.
+    for af in audio_opts[:4]:
+        parts.append(f"bv*[ext=mp4][vcodec^=avc1][height<={max_height}]+{af}")
+        parts.append(f"bv*[ext=mp4][vcodec^=avc1][width<={max_height}]+{af}")
+        parts.append(f"bv*[ext=mp4][height<={max_height}]+{af}")
+        parts.append(f"bv*[ext=mp4][width<={max_height}]+{af}")
+        parts.append(f"bv*[height<={max_height}]+{af}")
+        parts.append(f"bv*[width<={max_height}]+{af}")
+    parts.extend([
+        f"bv*[ext=mp4][vcodec^=avc1][height<={max_height}]+ba[ext=m4a]",
+        f"bv*[ext=mp4][vcodec^=avc1][width<={max_height}]+ba[ext=m4a]",
+        f"bv*[ext=mp4][height<={max_height}]+ba[ext=m4a]",
+        f"bv*[ext=mp4][width<={max_height}]+ba[ext=m4a]",
+        f"bv*[height<={max_height}]+ba",
+        f"bv*[width<={max_height}]+ba",
+        f"b[height<={max_height}]",
+        f"b[width<={max_height}]",
+        "b",
+    ])
+    # сохраняем порядок, убирая дубли
+    return "/".join(dict.fromkeys(parts))
+
+
+def _audio_only_selector(language: Optional[str] = None) -> str:
+    wanted = _norm_lang(language)
+    base = wanted.split("-", 1)[0] if wanted else ""
+    parts: List[str] = []
+    if base and re.fullmatch(r"[a-z]{2,3}", base):
+        parts.extend([
+            f"ba[language^={base}][format_note*=original][abr<=96]",
+            f"ba[language^={base}][format_note*=original]",
+            f"ba[language^={base}][abr<=96]",
+            f"ba[language^={base}]",
+        ])
+    parts.extend([
+        "ba[format_note*=original][abr<=96]",
+        "ba[format_note*=original]",
+        AUDIO_FORMAT,
+    ])
+    return "/".join(dict.fromkeys(parts))
+
+
 def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
              browser: Optional[str], progress: ProgressCb,
              pot: bool = False, extractor_args: Optional[Dict[str, Any]] = None,
@@ -236,6 +359,7 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
     opts: Dict[str, Any] = {
         "outtmpl": outtmpl,
         "format": fmt,
+        "format_sort": ["lang"],
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -296,6 +420,7 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
     acodec = info.get("acodec")
     fps = info.get("fps")
     selected = info.get("format_id") or ""
+    audio_lang = info.get("language") or None
     for rf in info.get("requested_formats") or []:
         if rf.get("height"):
             height = max(height or 0, rf["height"])
@@ -304,6 +429,8 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
             fps = rf.get("fps") or fps
         if (rf.get("acodec") or "none") != "none":
             acodec = rf.get("acodec")
+            if rf.get("language"):
+                audio_lang = rf.get("language")
 
     max_height = 0
     for f in info.get("formats") or []:
@@ -334,6 +461,7 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
         "fps": fps,
         "vcodec": vcodec,
         "acodec": acodec,
+        "audio_language": audio_lang,
         "selected_format": selected,
         "filesize": size,
         "download_seconds": download_seconds,
@@ -422,7 +550,8 @@ def _youtube_info(url: str, browser: Optional[str], pot: bool,
     raise DownloadError("YouTube не отдал видео ни одному клиенту. " + detail[-350:])
 
 
-def _pick_format(info: Dict[str, Any], max_height: int) -> tuple[str, int]:
+def _pick_format(info: Dict[str, Any], max_height: int,
+                 language: Optional[str] = None) -> tuple[str, int]:
     """Формат из фактически доступных — вместо «слепой» строки селектора.
 
     Возвращает (селектор, реальная высота): подпись в интерфейсе должна
@@ -445,14 +574,22 @@ def _pick_format(info: Dict[str, Any], max_height: int) -> tuple[str, int]:
 
     video = max(fitting, key=rank)
     height = int(video.get("height") or 0)
-    if (video.get("acodec") or "none") != "none":
-        return str(video["format_id"]), height
     audios = [f for f in formats
               if (f.get("vcodec") or "none") == "none" and (f.get("acodec") or "none") != "none"]
+    if (video.get("acodec") or "none") != "none":
+        # Если у видео есть раздельные аудиодорожки с языками и пользователь
+        # попросил конкретный язык (или дорожка видео не совпадает с ним),
+        # лучше взять нужную аудиодорожку отдельно, если она есть.
+        wanted = _norm_lang(language)
+        if not wanted or not audios or _lang_matches(video.get("language"), wanted):
+            return str(video["format_id"]), height
     if audios:
-        audio = max(audios, key=lambda f: (1 if f.get("ext") == "m4a" else 0,
-                                           float(f.get("abr") or f.get("tbr") or 0)))
-        return f"{video['format_id']}+{audio['format_id']}", height
+        audio = _pick_audio(audios, language=language, video_lang=info.get("language"))
+        if audio:
+            print(f"[youtube] аудио: {audio.get('format_id')} lang={audio.get('language') or '?'} "
+                  f"pref={audio.get('language_preference')} note={audio.get('format_note') or ''!r} "
+                  f"(запрос: {language or 'auto'})", file=sys.stderr, flush=True)
+            return f"{video['format_id']}+{audio['format_id']}", height
     return str(video["format_id"]), height
 
 
@@ -479,16 +616,18 @@ def _retry_503(action: Callable[[], Any], quality: int, progress: ProgressCb):
 
 
 def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
-                            browser: Optional[str], progress: ProgressCb) -> Dict[str, Any]:
+                            browser: Optional[str], progress: ProgressCb,
+                            language: Optional[str] = None) -> Dict[str, Any]:
     pot = _pot_enabled()
     # У Shorts нужная ступень указана шириной. В обоих случаях ограничиваем
     # вторую сторону снизу, чтобы выбрать разрешение по короткой стороне.
     video = f"[height={quality}][width>={quality}]"
     vertical = f"[width={quality}][height>={quality}]"
     filters = (video, vertical)
-    selector = "/".join(
-        [f"bv{f}+ba" for f in filters] + [f"b{f}" for f in filters]
-    )
+    audio_opts = _audio_selector_variants(language)
+    selector = "/".join(dict.fromkeys(
+        [f"bv{f}+{af}" for af in audio_opts for f in filters] + [f"b{f}" for f in filters]
+    ))
     exact_selector = selector
     args = None
     label = "YouTube"
@@ -498,7 +637,8 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
         matching = [f for f in info.get("formats") or []
                     if (f.get("vcodec") or "none") == "none" or _resolution(f) == quality]
         if any((f.get("vcodec") or "none") != "none" for f in matching):
-            fmt, _ = _pick_format({"formats": matching}, quality)
+            fmt, _ = _pick_format({"formats": matching, "language": info.get("language")},
+                                  quality, language=language)
             has_audio = "+" in fmt or any(
                 str(f.get("format_id")) == fmt and (f.get("acodec") or "none") != "none"
                 for f in matching
@@ -562,26 +702,15 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
 
 def download(url: str, dest_dir: Path, progress: ProgressCb = None,
              browser: Optional[str] = None, max_height: int = 1080,
-             force_hd: bool = False, exact_quality: bool = False) -> Dict[str, Any]:
+             force_hd: bool = False, exact_quality: bool = False,
+             language: Optional[str] = None) -> Dict[str, Any]:
     """Скачивает видео. По умолчанию цель — 1080p, при блокировке видимый откат к SD."""
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     if is_youtube(url) and (force_hd or exact_quality) and max_height in YOUTUBE_QUALITIES:
-        return _download_exact_youtube(url, dest_dir, max_height, browser, progress)
+        return _download_exact_youtube(url, dest_dir, max_height, browser, progress, language=language)
 
-    if max_height <= 360:
-        hd_format = FORMAT_SD
-    else:
-        # width-варианты нужны для вертикальных видео (Shorts, Twitter): у них
-        # «height» — длинная сторона, и фильтр height<=1080 отбрасывает 1080p.
-        hd_format = (
-            f"bv*[ext=mp4][vcodec^=avc1][height<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][vcodec^=avc1][width<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][height<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][width<={max_height}]+ba[ext=m4a]/"
-            f"bv*[height<={max_height}]+ba/bv*[width<={max_height}]+ba/"
-            f"b[height<={max_height}]/b[width<={max_height}]/b"
-        )
+    hd_format = _hd_format_selector(max_height, language=language)
 
     attempts: List[tuple] = []
     if not is_youtube(url):
@@ -597,7 +726,7 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
         picked = None
         try:
             info, args, client_label = _youtube_info(url, browser, pot, progress, preferred_height=max_height)
-            picked = (_pick_format(info, max_height), args, client_label)
+            picked = (_pick_format(info, max_height, language=language), args, client_label)
         except DownloadError as exc:
             print(f"[youtube] метаданные не получены: {exc}", file=sys.stderr)
         if picked is not None:
@@ -664,7 +793,8 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
         if ytdlp_bin.enabled():
             if progress:
                 progress(0.02, "Пробую запасной движок загрузки…")
-            meta = ytdlp_bin.download(url, dest_dir, max_height, browser, progress)
+            meta = ytdlp_bin.download(url, dest_dir, max_height, browser, progress,
+                                      format_selector=hd_format)
             try:
                 info = utils.probe(meta["path"])
                 meta["height"] = info.get("height") or None
@@ -935,7 +1065,8 @@ def _extract_direct_audio(url: str, dest_dir: Path, progress: ProgressCb = None)
 
 
 def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
-                   browser: Optional[str] = None) -> Dict[str, Any]:
+                   browser: Optional[str] = None,
+                   language: Optional[str] = None) -> Dict[str, Any]:
     """Скачивает только звук — в разы меньше полного видео."""
     import yt_dlp
 
@@ -975,7 +1106,8 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
 
     opts: Dict[str, Any] = {
         "outtmpl": outtmpl,
-        "format": AUDIO_FORMAT,
+        "format": _audio_only_selector(language),
+        "format_sort": ["lang"],
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -1112,7 +1244,8 @@ def inspect_url(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
 def download_section(url: str, dest_dir: Path, start: float, end: float,
                      progress: ProgressCb = None, browser: Optional[str] = None,
                      max_height: int = 1080,
-                     quality: Optional[Dict[str, Any]] = None) -> Path:
+                     quality: Optional[Dict[str, Any]] = None,
+                     language: Optional[str] = None) -> Path:
     """Скачивает только фрагмент видео (для экономного режима).
 
     Прямые ссылки на файл режем локальным ffmpeg: yt-dlp с `download_ranges` на
@@ -1131,17 +1264,7 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
         # «ffmpeg is not installed». Проверяем заранее — и говорим по-человечески.
         raise _ffmpeg_missing_error()
     outtmpl = str(dest_dir / "section.%(ext)s")
-    if max_height <= 360:
-        fmt = FORMAT_SD
-    else:
-        fmt = (
-            f"bv*[ext=mp4][vcodec^=avc1][height<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][vcodec^=avc1][width<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][height<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][width<={max_height}]+ba[ext=m4a]/"
-            f"bv*[height<={max_height}]+ba/bv*[width<={max_height}]+ba/"
-            f"b[height<={max_height}]/b[width<={max_height}]/b"
-        )
+    fmt = _hd_format_selector(max_height, language=language)
     if not is_youtube(url):
         fmt = f"b[width<={max_height}]/b[height<={max_height}]/b/" + fmt
 
@@ -1177,6 +1300,7 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
         opts: Dict[str, Any] = {
             "outtmpl": outtmpl,
             "format": fmt_try,
+            "format_sort": ["lang"],
             "merge_output_format": "mp4",
             "noplaylist": True,
             "quiet": True,

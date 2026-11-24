@@ -127,7 +127,8 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
     dest_dir.mkdir(parents=True, exist_ok=True)
     out_tpl = str(dest_dir / "source.%(ext)s")
     cmd = [str(path), "--no-playlist", "--newline", "--no-warnings",
-           "-f", format_selector or _fmt_for(max_height), "--merge-output-format", "mp4",
+           "-f", format_selector or _fmt_for(max_height), "-S", "lang",
+           "--merge-output-format", "mp4",
            "-o", out_tpl, "--progress"]
     if format_selector:
         cmd.append("--abort-on-unavailable-fragments")

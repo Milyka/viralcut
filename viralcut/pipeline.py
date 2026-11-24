@@ -185,8 +185,16 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                     workdir: Path, progress: Callable[[float, str], None]) -> Path:
     """Скачивает исходник, пишет метаданные и возвращает путь к файлу."""
     # Повтор после отмены не должен заново качать часовое видео: исходник уже
-    # лежит в папке проекта. Единственное исключение — принудительное HD.
-    if not opts.get("force_hd"):
+    # лежит в папке проекта. Исключения — принудительное HD или смена языка аудио.
+    wanted_lang = (opts.get("language") or "").strip().lower()
+    cached_audio_lang = str((project.get("meta") or {}).get("audio_language") or "").strip().lower()
+    lang_changed = bool(
+        wanted_lang
+        and cached_audio_lang
+        and not (cached_audio_lang == wanted_lang or cached_audio_lang.startswith(wanted_lang + "-"))
+        and not project["url"].startswith("local:")
+    )
+    if not opts.get("force_hd") and not lang_changed:
         for name in ("source.mp4", "source.mkv", "source.webm", "source.mov", "source.m4a", "source.mp3"):
             cached = workdir / name
             if cached.exists() and cached.stat().st_size > 1024:
@@ -224,6 +232,7 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                     force_hd=opts.get("force_hd", False),
                     exact_quality=opts.get("exact_quality", False),
                     max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
+                    language=opts.get("language") or None,
                 )
         except downloader.DownloadError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -239,6 +248,7 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                   "source_height": info["height"], "quality": meta.get("quality"),
                   "max_height": meta.get("max_height"),
                   "selected_format": meta.get("selected_format"),
+                  "audio_language": meta.get("audio_language"),
                   "vcodec": meta.get("vcodec"), "fps": meta.get("fps"),
                   "download_seconds": meta.get("download_seconds"),
                   "merge_seconds": meta.get("merge_seconds"),
@@ -317,6 +327,7 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
     audio = downloader.download_audio(
         project["url"], workdir, browser=opts.get("cookies_browser") or None,
         progress=lambda p, st: progress(0.02 + p * 0.28, st),
+        language=opts.get("language") or None,
     )
     duration = float(audio.get("duration") or 0) or utils.media_duration(audio["path"])
     if duration < 5:
@@ -364,6 +375,7 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
             project["url"], workdir / "preview_src", sec_start, sec_end,
             progress=lambda p, st: progress(0.78 + p * 0.16, st),
             browser=opts.get("cookies_browser") or None, max_height=360,
+            language=opts.get("language") or None,
         )
         shutil.copy2(part, preview_path)
         shutil.rmtree(workdir / "preview_src", ignore_errors=True)
@@ -409,6 +421,7 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                 # пересборка в HD забирает фрагменты в 1080p, а не в 360
                 max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
                 quality=quality,
+                language=opts.get("language") or None,
             )
             low_res.append(int(quality.get("height") or 0))
             if os.environ.get("VIRALCUT_DEBUG_SECTIONS"):

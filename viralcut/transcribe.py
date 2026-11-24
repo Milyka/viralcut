@@ -50,11 +50,33 @@ BATCH_SIZE = max(1, int(os.environ.get("VIRALCUT_WHISPER_BATCH_SIZE", "8")))
 BATCH_MIN_SECONDS = float(os.environ.get("VIRALCUT_WHISPER_BATCH_MIN", "60"))
 # Порог уверенности, ниже которого сегмент считаем сомнительным.
 WEAK_LOGPROB = float(os.environ.get("VIRALCUT_WHISPER_WEAK_LOGP", "-0.62"))
-# Подсказка для декодера: пунктуация, регистр и типичные для роликов слова.
-ASR_PROMPT = os.environ.get("VIRALCUT_WHISPER_PROMPT", (
+# Языки с кириллицей: используются для выбора подсказки и проверки письменности.
+_CYRILLIC_LANGS = ("ru", "uk", "be", "kk", "bg", "sr", "mk")
+# Подсказка для декодера подбирается строго под язык речи, чтобы русский промпт
+# никогда не смещал декодирование английской или автоопределяемой речи в кириллицу.
+_ASR_PROMPT_ENV = os.environ.get("VIRALCUT_WHISPER_PROMPT")
+ASR_PROMPT_RU = (
     "ViralCut, вертикальные клипы, субтитры, подкаст, интервью. "
     "Русская речь с пунктуацией; имена и термины пишутся так же, как в оригинале."
-))
+)
+ASR_PROMPT_EN = (
+    "Podcast, interview, educational video. "
+    "Clear English speech with natural punctuation and capitalization."
+)
+ASR_PROMPT = _ASR_PROMPT_ENV if _ASR_PROMPT_ENV is not None else ASR_PROMPT_RU
+
+
+def _prompt_for_language(language: Optional[str]) -> Optional[str]:
+    if _ASR_PROMPT_ENV is not None:
+        return _ASR_PROMPT_ENV or None
+    code = (language or "").strip().lower().replace("_", "-").split("-", 1)[0]
+    if not code or code == "auto":
+        return None
+    if code in _CYRILLIC_LANGS:
+        return ASR_PROMPT_RU
+    if code == "en":
+        return ASR_PROMPT_EN
+    return None
 
 
 class TranscriptionError(Exception):
@@ -174,6 +196,7 @@ def _decode(model, audio: Path, language: Optional[str], vad: bool,
             prompt: Optional[str] = None, beam: Optional[int] = None,
             temperature=None, condition: bool = True):
     """Один проход декодирования с настройками под качество."""
+    effective_prompt = prompt if prompt is not None else _prompt_for_language(language)
     return model.transcribe(
         str(audio),
         language=language or None,
@@ -186,7 +209,7 @@ def _decode(model, audio: Path, language: Optional[str], vad: bool,
         no_repeat_ngram_size=3,
         condition_on_previous_text=condition,
         prompt_reset_on_temperature=0.5,
-        initial_prompt=(prompt or ASR_PROMPT),
+        initial_prompt=effective_prompt,
         vad_filter=vad,
         vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200} if vad else None,
         word_timestamps=True,
@@ -203,16 +226,18 @@ def _decode_batched(model, audio: Path, language: Optional[str], vad: bool):
     from faster_whisper import BatchedInferencePipeline
 
     pipe = BatchedInferencePipeline(model=model)
+    effective_prompt = _prompt_for_language(language)
     kwargs = dict(
         language=language or None,
         task="transcribe",
         beam_size=BEAM_SIZE,
         condition_on_previous_text=True,
-        initial_prompt=ASR_PROMPT,
         vad_filter=vad,
         word_timestamps=True,
         batch_size=BATCH_SIZE,
     )
+    if effective_prompt:
+        kwargs["initial_prompt"] = effective_prompt
     try:
         return pipe.transcribe(str(audio), **kwargs)
     except TypeError:
@@ -295,9 +320,6 @@ def _transcribe_span(model, path: Path, language: Optional[str], offset: float,
 
 _PROBE_SECONDS = 60.0
 _PROBE_MIN_PROBABILITY = 0.55
-# Языки с кириллицей: если Whisper «увидел» английский, а текст кириллический,
-# значит язык определён неверно — перераспознаём на русском.
-_CYRILLIC_LANGS = ("ru", "uk", "be", "kk", "bg", "sr", "mk")
 _CYR_RE = re.compile(r"[А-Яа-яЁё]")
 _LAT_RE = re.compile(r"[A-Za-z]")
 
@@ -446,7 +468,8 @@ def _recheck(model, wav: Path, workdir: Path, segments: List[Dict[str, Any]],
                 continue
             before = [s["text"] for s in segments if s["end"] <= seg["start"]][-2:]
             context = " ".join(before)[-220:]
-            prompt = (context + " " + ASR_PROMPT)[-400:]
+            base_prompt = _prompt_for_language(language) or ""
+            prompt = (context + (" " + base_prompt if base_prompt else "")).strip()[-400:] or None
             try:
                 parts, _ = _decode(model, clip, language, False, prompt=prompt,
                                    beam=BEAM_SIZE, temperature=[0.0], condition=False)

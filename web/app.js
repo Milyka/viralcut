@@ -1235,6 +1235,7 @@ function reviewHTML(project) {
     m.pending ? `найдено ${m.pending} моментов` : "",
     m.download_seconds ? `скачано за ${Math.round(m.download_seconds)} с` : ""
   ].filter(Boolean).join(" · ");
+  const reviewAspect = (project.options && project.options.aspect) || "9:16";
   return `
   <div class="project-head">
     <div>
@@ -1248,8 +1249,8 @@ function reviewHTML(project) {
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
     </div>
   </div>
-  <div class="review-card">
-    ${project.source_url ? `<video src="${project.source_url}" controls muted playsinline></video>` : ""}
+  <div class="review-card" data-aspect="${esc(reviewAspect)}">
+    ${project.source_url ? `<video src="${project.source_url}" data-aspect="${esc(reviewAspect)}" controls muted playsinline></video>` : ""}
     <div>
       <div class="review-title">Шаблон ещё не выбран</div>
       <p class="review-text">Откройте настройку, посмотрите пример субтитров на видео, выберите шрифт, размер, цвет и положение. Нарезка начнётся после подтверждения.</p>
@@ -1569,9 +1570,29 @@ $("#main").addEventListener("click", async (e) => {
 
 /* ---------------- Template preview ---------------- */
 
+const PREVIEW_ASPECTS = {
+  "9:16": [1080, 1920],
+  "16:9": [1920, 1080],
+  "1:1": [1080, 1080],
+  "4:5": [1080, 1350],
+};
+
+function normalizeAspect(aspect) {
+  return PREVIEW_ASPECTS[aspect] ? aspect : "9:16";
+}
+
+function applyPreviewAspect(box, badge, aspect) {
+  const a = normalizeAspect(aspect);
+  if (box) box.dataset.aspect = a;
+  if (badge) badge.textContent = a;
+  const body = box && box.closest(".tmpl-body, .editor-body");
+  if (body) body.dataset.previewAspect = a;
+}
+
 function templateDefaults(project) {
   const o = project.options || {};
   return {
+    aspect: normalizeAspect(o.aspect || state.opts.aspect || "9:16"),
     font: o.sub_font || "montserrat",
     size: Number(o.sub_size || 118),
     pos: o.sub_position || "bottom",
@@ -1610,8 +1631,12 @@ function updateTemplatePreview() {
   const offset = Number($("#tpOffset").value);
   const upper = $("#tpUpper").checked;
   const accent = state.tmplAccent || "yellow";
-  const width = stage.clientWidth || 340;
-  const px = Math.max(11, Math.round(size * 0.76 * (width / 1080)));
+  const aspect = normalizeAspect(stage.dataset.aspect || state.opts.aspect || "9:16");
+  const [refW, refH] = PREVIEW_ASPECTS[aspect];
+  const width = stage.clientWidth || (aspect === "16:9" ? 380 : 235);
+  const height = stage.clientHeight || Math.round(width * (refH / refW));
+  const scale = Math.min(width / 1080, height / 1920);
+  const px = Math.max(11, Math.round(size * 0.76 * scale));
   cap.style.fontFamily = FONT_CSS[font] || "VCMontserrat";
   cap.style.fontSize = px + "px";
   cap.style.textTransform = upper ? "uppercase" : "none";
@@ -1706,6 +1731,14 @@ function openTemplate(pid) {
   state.tmplAccent = "yellow";
   state.tmplReady = false;
 
+  const listedProject = state.projects.find((p) => p.id === pid);
+  const initAspect = normalizeAspect(
+    (state.detail && state.detail.project && state.detail.project.id === pid && state.detail.project.options?.aspect)
+    || (listedProject && listedProject.options?.aspect)
+    || state.opts.aspect
+    || "9:16"
+  );
+
   $("#modal").innerHTML = `
     <div class="modal-backdrop" data-close="tmpl"></div>
     <div class="modal-panel workbench tmpl-panel" role="dialog" aria-modal="true" aria-labelledby="templateTitle">
@@ -1713,10 +1746,10 @@ function openTemplate(pid) {
         <h3 id="templateTitle">Настройка субтитров</h3>
         <button class="icon-btn" data-close="tmpl" aria-label="Закрыть">${ICONS.close}</button>
       </div>
-      <div class="tmpl-body">
+      <div class="tmpl-body" data-preview-aspect="${esc(initAspect)}">
         <div class="tmpl-left">
-          <div class="preview-heading"><b>Предпросмотр</b><span>9:16</span></div>
-          <div class="tmpl-stage" id="tmplStage">
+          <div class="preview-heading"><b>Предпросмотр</b><span id="tpAspectBadge">${esc(initAspect)}</span></div>
+          <div class="tmpl-stage" id="tmplStage" data-aspect="${esc(initAspect)}">
             <video id="tmplVideo" muted loop playsinline controls aria-label="Предпросмотр субтитров"></video>
             <div class="tmpl-caption" id="tmplCaption" title="Перетащите субтитры в нужное место"><span class="w hl">ПРИМЕР</span> <span class="w">СУБТИТРОВ</span></div>
             <div class="tmpl-veil" id="tmplVeil">
@@ -1869,6 +1902,8 @@ async function tmplPoll() {
     const veil = $("#tmplVeil");
     const text = $("#tmplStageText");
     if (!veil) return;
+    const projAspect = normalizeAspect((project.options && project.options.aspect) || state.opts.aspect || "9:16");
+    applyPreviewAspect($("#tmplStage"), $("#tpAspectBadge"), projAspect);
 
     if (project.status === "preparing" || project.status === "queued") {
       veil.classList.remove("hidden");
@@ -1889,6 +1924,7 @@ async function tmplPoll() {
     }
     if (project.status === "review") {
       const defaults = templateDefaults(project);
+      applyPreviewAspect($("#tmplStage"), $("#tpAspectBadge"), defaults.aspect);
       $("#tpFont").value = defaults.font;
       $("#tpSize").value = defaults.size;
       $("#tpPos").value = defaults.pos;
@@ -1991,6 +2027,7 @@ function openEditor(clipId) {
   const fontPos = s.sub_position || "bottom";
   const fontOffset = Number(s.sub_offset || 0);
   const subSpeed = s.sub_speed || "calm";
+  const clipAspect = normalizeAspect(s.aspect || (project.options && project.options.aspect) || "9:16");
 
   $("#modal").innerHTML = `
     <div class="modal-backdrop" data-close></div>
@@ -1999,10 +2036,10 @@ function openEditor(clipId) {
         <div><h3 id="editorTitle">Редактировать клип</h3><div class="dialog-subtitle">${esc(clip.title || "")}</div></div>
         <button class="icon-btn" data-close aria-label="Закрыть">${ICONS.close}</button>
       </div>
-      <div class="modal-body editor-body">
+      <div class="modal-body editor-body" data-preview-aspect="${esc(clipAspect)}">
         <div class="editor-preview">
-          <div class="preview-heading"><b>Предпросмотр</b><span>${esc(s.aspect || "9:16")}</span></div>
-          <div class="editor-video"><video id="edVideo" src="${clipUrl(clip)}" controls playsinline aria-label="Предпросмотр клипа"></video></div>
+          <div class="preview-heading"><b>Предпросмотр</b><span id="edAspectBadge">${esc(clipAspect)}</span></div>
+          <div class="editor-video" id="edVideoBox" data-aspect="${esc(clipAspect)}"><video id="edVideo" src="${clipUrl(clip)}" controls playsinline aria-label="Предпросмотр клипа"></video></div>
         </div>
         <div class="form-stack">
           <section class="form-card form-stack">
@@ -2145,6 +2182,9 @@ function openEditor(clipId) {
 
   $("#edSize").addEventListener("input", (e) => { $("#edSizeVal").textContent = e.target.value; });
   $("#edFont").addEventListener("change", syncEditorSample);
+  $("#edAspect").addEventListener("change", (e) => {
+    applyPreviewAspect($("#edVideoBox"), $("#edAspectBadge"), e.target.value);
+  });
   const edFontAdd = $("#edFontAdd");
   if (edFontAdd) edFontAdd.addEventListener("click", () => {
     state.fontTarget = "#edFont";

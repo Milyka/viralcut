@@ -214,7 +214,6 @@ class Recorder:
             meta["live_error"] = self.live_error
             db.merge_meta(self.pid, meta)
         else:
-            meta["live_error"] = None
             db.merge_meta(self.pid, meta, drop=("live_error",))
         db.update_project(self.pid, progress=min(99.0, max(0.0, self.duration)))
         if stage:

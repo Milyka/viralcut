@@ -631,7 +631,8 @@ def process_project(pid: str) -> None:
         }
         _check_cancel(pid)
         total = len(found)
-        progress(0.60, f"Рендер {total} клипов")
+        clip_word = "клипа" if (total % 10 == 1 and total % 100 != 11) else "клипов"
+        progress(0.60, f"Рендер {total} {clip_word}")
         clips = []
         for i, cand in enumerate(found):
             clip = db.add_clip(
@@ -1107,6 +1108,7 @@ def add_manual_clip(pid: str, start: float, end: float,
     # а клиентский isBusy() сам отслеживает клипы со статусом "rendering".
     if project.get("status") == "review":
         db.update_project(pid, status="done", progress=100, stage="Ручной клип", error=None)
+    db.merge_meta(pid, {"clips": len(existing) + 1})
     _jobs.submit_rerender(clip["id"], {})
     return clip
 

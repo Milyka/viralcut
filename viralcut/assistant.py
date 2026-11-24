@@ -382,10 +382,12 @@ def ask(question: str, context: Dict[str, Any],
         return _with_actions("", [undo], context, source="local")
     if not ai_module.configured():
         actions = assistant_actions.parse_local(question)
+        if actions:
+            return _with_actions("", actions, context, source="local",
+                                 extra={"hint": "Ключ ИИ не задан — выполняю по встроенным правилам."})
         found = local_answer(question) or fallback_answer(question)
-        result = _with_actions(found["answer"], actions, context, source="local",
-                               extra={"hint": "Ключ ИИ не задан — выполняю по встроенным правилам."})
-        return result
+        return _with_actions(found["answer"], [], context, source="local",
+                             extra={"hint": "Ключ ИИ не задан — отвечаю по встроенной инструкции."})
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": (WELCOME_RULES + "\n\n" + assistant_actions.ACTIONS_SPEC
                                        + "\n\nБаза знаний:\n" + knowledge_text()

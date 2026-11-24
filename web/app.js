@@ -289,11 +289,29 @@ async function api(path, options = {}) {
 }
 
 function toast(text, kind) {
+  const stack = $("#toasts");
+  if (!stack) return;
   const node = document.createElement("div");
   node.className = "toast" + (kind === "err" ? " err" : "");
-  node.textContent = text;
-  $("#toasts").appendChild(node);
-  setTimeout(() => node.remove(), 4200);
+  node.setAttribute("role", "status");
+  node.innerHTML = `<span class="toast-dot" aria-hidden="true"></span><span class="toast-text">${esc(text)}</span>`;
+  let gone = false;
+  const dismiss = async () => {
+    if (gone || !node.isConnected) return;
+    gone = true;
+    node.setAttribute("data-closing", "");
+    const anims = typeof node.getAnimations === "function" ? node.getAnimations() : [];
+    if (anims.length) {
+      await Promise.race([
+        Promise.allSettled(anims.map((a) => a.finished)),
+        new Promise((r) => setTimeout(r, 320))
+      ]);
+    }
+    node.remove();
+  };
+  node.addEventListener("click", dismiss);
+  stack.appendChild(node);
+  setTimeout(dismiss, kind === "err" ? 4600 : 3400);
 }
 
 /* ---------------- Sidebar ---------------- */
@@ -306,7 +324,9 @@ function renderSidebar() {
   }
   list.innerHTML = state.projects.map((p) => {
     const when = new Date((p.created_at || 0) * 1000).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
-    const sub = p.status === "done" ? `${p.meta?.clips || ""} клипов · ${when}` : p.status === "error" ? "ошибка" : p.status === "running" ? "обработка…" : when;
+    const count = Number(p.meta?.clips || 0);
+    const clipsLabel = count > 0 ? `${count} ${plural(count, "клип", "клипа", "клипов")} · ` : "";
+    const sub = p.status === "done" ? `${clipsLabel}${when}` : p.status === "error" ? "ошибка" : p.status === "running" ? "обработка…" : when;
     return `<button class="project-item ${state.current === p.id ? "active" : ""}" data-project="${p.id}">
       <span class="project-item-icon">${p.meta?.live ? ICONS.play : OPT_ICONS.frame}<span class="status-dot ${esc(p.status)}"></span></span>
       <span class="project-item-text">
@@ -902,7 +922,7 @@ function stepsHTML(project) {
   const steps = [
     { t: "Загрузка", at: 14 },
     { t: "Распознавание речи", at: 58 },
-    { t: "Поиск моментов", at: 62 },
+    { t: "Поиск моментов", at: 59 },
     { t: "Рендер клипов", at: 100 }
   ];
   return steps.map((s, i) => {
@@ -1020,7 +1040,7 @@ function clipsGridHTML() {
   }
   const cards = clips.map((c) => {
     const dur = Math.max(0, (c.end || 0) - (c.start || 0));
-    const score = Math.round((c.score || 0) * 100);
+    const score = Math.min(100, Math.max(0, Math.round((c.score || 0) * 100)));
     const p = project.id;
     const url = `/media/${p}/clips/clip_${String(c.idx + 1).padStart(2, "0")}.mp4?v=${Math.round(c.updated_at || 0)}`;
     const preview = c.has_preview ? `/media/${p}/previews/${c.id}.mp4?v=${Math.round(c.updated_at || 0)}` : url;
@@ -1241,6 +1261,7 @@ function reviewHTML(project) {
 function resultsHTML() {
   const { project, clips } = state.detail;
   const ready = clips.filter((c) => c.status === "ready");
+  const canSmartAll = ready.some((c) => (c.settings?.mode || "auto") !== "auto");
   return `
   <div class="project-head results-head">
     <div>
@@ -1257,7 +1278,7 @@ function resultsHTML() {
       ${ready.length ? `<a class="btn-primary" href="/api/projects/${project.id}/zip" data-download-zip="${project.id}" style="display:inline-flex;align-items:center;gap:7px">${ICONS.zip} Скачать всё</a>` : ""}
       <button class="btn-ghost" data-action="folder" title="Открыть папку с готовыми MP4">${ICONS.folder} Открыть папку</button>
       ${ready.length ? `<button class="btn-ghost" data-action="ai-advice" title="Подсказки по хуку, таймингу и субтитрам">${ICONS.spark} Совет ИИ</button>` : ""}
-      ${ready.length ? `<button class="btn-ghost" data-action="smart-all">Пересобрать в умный кроп</button>` : ""}
+      ${canSmartAll ? `<button class="btn-ghost" data-action="smart-all">Пересобрать в умный кроп</button>` : ""}
       <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
       <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
@@ -2057,7 +2078,7 @@ function openEditor(clipId) {
                   </select>
                   <button type="button" class="font-add" id="edFontAdd" title="Загрузить свой шрифт">＋</button>
                 </div>
-                <div class="font-sample ed-sample" id="edFontSample" style="font-family:${FONT_CSS[fontKey] || "VCMontserrat"}">ПРИМЕР СУБТИТРОВ</div>
+                <div class="font-sample ed-sample" id="edFontSample" style="font-family:${FONT_CSS[fontKey] || "VCMontserrat"}">ПРИМЕР <span class="ed-hl" style="color:${ACCENT_HEX[accent] || ACCENT_HEX.yellow}">СУБТИТРОВ</span></div>
               </div>
               <div class="field">
                 <label>Положение</label>
@@ -2104,20 +2125,26 @@ function openEditor(clipId) {
     </div>`;
 
   $("#modal").classList.remove("hidden");
+  loadAudioTracks(project.id);
 
   let chosenAccent = accent;
+  const syncEditorSample = () => {
+    const sample = $("#edFontSample");
+    if (!sample) return;
+    sample.style.fontFamily = FONT_CSS[$("#edFont").value] || "VCMontserrat";
+    const hl = sample.querySelector(".ed-hl");
+    if (hl) hl.style.color = ACCENT_HEX[chosenAccent] || ACCENT_HEX.yellow;
+  };
   $("#edAccents").addEventListener("click", (e) => {
     const b = e.target.closest(".swatch");
     if (!b) return;
     chosenAccent = b.dataset.val;
     $$(".swatch", $("#edAccents")).forEach((x) => x.classList.toggle("active", x === b));
+    syncEditorSample();
   });
 
   $("#edSize").addEventListener("input", (e) => { $("#edSizeVal").textContent = e.target.value; });
-  $("#edFont").addEventListener("change", () => {
-    const sample = $("#edFontSample");
-    if (sample) sample.style.fontFamily = FONT_CSS[$("#edFont").value] || "VCMontserrat";
-  });
+  $("#edFont").addEventListener("change", syncEditorSample);
   const edFontAdd = $("#edFontAdd");
   if (edFontAdd) edFontAdd.addEventListener("click", () => {
     state.fontTarget = "#edFont";
@@ -2565,6 +2592,20 @@ async function loadAiModels(selected, force) {
     && window.__aiProvider === provider;
   const fallback = AI_FALLBACK_MODELS[provider] || [];
   const hint = $("#setAiModelHint");
+  const baseVal = ($("#setAiBase")?.value || "").trim();
+  if (!force && (provider === "local" || provider === "custom") && !baseVal) {
+    if (hint) {
+      hint.textContent = provider === "local"
+        ? "Нажмите «Найти локальный сервер» или укажите адрес (например, http://127.0.0.1:11434/v1)."
+        : "Укажите адрес API-сервера и нажмите «Обновить».";
+    }
+    select.innerHTML = (fallback.length ? fallback : [selected].filter(Boolean))
+      .map((id) => `<option value="${esc(id)}" ${id === selected ? "selected" : ""}>${esc(id)}</option>`).join("");
+    if (!select.options.length) {
+      select.innerHTML = `<option value="" selected>модель не выбрана</option>`;
+    }
+    return;
+  }
   if (hint) hint.textContent = "Загружаю список моделей…";
   try {
     const query = `?provider=${encodeURIComponent(provider)}${force ? "&force=true" : ""}`;
@@ -2925,7 +2966,7 @@ async function openSettings() {
           <div class="set-hint" id="setAiModelHint"></div>
           <label class="set-label" for="setAiKey" id="setAiKeyLabel">API-ключ</label>
           <div class="set-row">
-            <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
+            <input type="password" id="setAiKey" name="vc_ai_api_key" class="set-input" autocomplete="new-password" spellcheck="false"
                    placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
             <button class="btn-ghost danger" type="button" id="setAiKeyClear" ${conf.ai_key_set ? "" : "hidden"}>Удалить ключ</button>
           </div>
@@ -3026,6 +3067,7 @@ async function openSettings() {
       if (out) {
         out.textContent = data.report || "Пусто";
         out.classList.remove("hidden");
+        out.scrollIntoView({ behavior: "smooth", block: "nearest" });
       }
     } catch (err) {
       toast(err.message, "err");
@@ -3063,7 +3105,8 @@ async function openSettings() {
     $("#setAiKeyStatus").textContent = local ? "Для локальной модели ключ не нужен."
       : clearAiKey ? "Ключ будет удалён при сохранении настроек."
       : saved ? "Ключ сохранён на этом компьютере."
-      : "При сохранении новый ключ заменит предыдущий.";
+      : conf.ai_key_set ? "При сохранении новый ключ заменит предыдущий."
+      : "Ключ не задан — вставьте API-ключ и нажмите «Сохранить».";
   };
   $("#setAiKeyClear")?.addEventListener("click", () => {
     clearAiKey = true;
@@ -3334,8 +3377,10 @@ function pipCardHTML(detail) {
   const frameT = Math.max(1, Math.round((project.duration || 10) * 0.2));
   const previewBlock = project.source ? `
       <div class="pip-preview" id="pipPreview">
-        <img id="pipFrameImg" src="/api/projects/${esc(project.id)}/frame.jpg?t=${frameT}&width=640" alt="Кадр исходника" loading="lazy" />
-        <div class="pip-cam-box" id="pipCamBox"></div>
+        <div class="pip-frame-wrap">
+          <img id="pipFrameImg" src="/api/projects/${esc(project.id)}/frame.jpg?t=${frameT}&width=640" alt="Кадр исходника" loading="lazy" />
+          <div class="pip-cam-box" id="pipCamBox"></div>
+        </div>
       </div>` : "";
   return `
     <div class="pip-card" id="pipCard">
@@ -3587,8 +3632,8 @@ async function withRetry(fn, tries = 4, delay = 500) {
   try { await loadFontCatalog(); } catch (e) { console.error(e); }
   try { await loadAiStatus(); } catch (e) { console.error(e); }
   try {
-    // первый запуск: помощник сам рассказывает, что делать
-    if (localStorage.getItem("vcAssistantSeen") !== "1") {
+    // первый запуск: помощник сам рассказывает, что делать (только на широком экране, чтобы не закрывать форму)
+    if (localStorage.getItem("vcAssistantSeen") !== "1" && window.innerWidth >= 1180) {
       setTimeout(() => openAssistant(true), 1200);
     }
   } catch (e) { console.error(e); }

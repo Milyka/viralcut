@@ -322,7 +322,12 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
         current["enabled"] = body.enabled
     if body.cam:
         try:
-            current["cam"] = {k: int(body.cam[k]) for k in ("x", "y", "w", "h")}
+            cam_clean: Dict[str, Any] = {k: int(body.cam[k]) for k in ("x", "y", "w", "h")}
+            if isinstance(body.cam.get("source"), (list, tuple)) and len(body.cam["source"]) >= 2:
+                cam_clean["source"] = [int(body.cam["source"][0]), int(body.cam["source"][1])]
+            if body.cam.get("corner"):
+                cam_clean["corner"] = str(body.cam["corner"])
+            current["cam"] = cam_clean
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "Неверные координаты камеры")
     if body.cam_corner in ("top-left", "top-right", "bottom-left", "bottom-right"):

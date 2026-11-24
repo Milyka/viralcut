@@ -101,7 +101,7 @@ def _style_fields(item: Dict[str, Any]) -> Dict[str, Any]:
     if str(item.get("sub_position") or "") in _POSITIONS:
         out["sub_position"] = item["sub_position"]
     if isinstance(item.get("sub_size"), (int, float)):
-        out["sub_size"] = max(40, min(240, int(item["sub_size"])))
+        out["sub_size"] = max(70, min(180, int(item["sub_size"])))
     if "subtitles" in item:
         out["subtitles"] = bool(item["subtitles"])
     if "cut_pauses" in item:
@@ -292,8 +292,15 @@ def parse_local(question: str) -> List[Dict[str, Any]]:
     number = _clip_number(text)
     if number is not None and re.search(r"поправ|исправ|измени|пересобер|сделай|убери", text):
         edit: Dict[str, Any] = {"type": "rerender_clip", "clip_number": number}
-        for stem, accent in (("ж[её]лт", "yellow"), ("розов", "pink"),
-                             ("зел[её]н", "green"), ("красн", "red")):
+        for stem, accent in (
+            ("ж[её]лт", "yellow"), ("золот", "gold"), ("оранжев", "orange"),
+            ("коралл", "coral"), ("красн", "red"), ("розов", "pink"), ("роз[аоу]", "rose"),
+            ("маджент", "magenta"), ("фиолетов", "violet"), ("пурпур", "purple"),
+            ("индиго", "indigo"), ("небесн", "sky"), ("голуб|циан", "cyan"),
+            ("син[ияе]", "blue"), ("бирюз", "teal"), ("мятн", "mint"),
+            ("зел[её]н", "green"), ("лайм", "lime"), ("персик", "peach"),
+            ("лаванд", "lavender"), ("бел[ыоа]", "white"),
+        ):
             if re.search(stem, text):
                 edit["accent"] = accent
                 break
@@ -311,10 +318,16 @@ def parse_local(question: str) -> List[Dict[str, Any]]:
     number = _number(text)
     mentions_cpu = bool(re.search(r"(процессор|cpu|ядер|процент|%)", text))
     mentions_limit = bool(re.search(r"(лимит|потолок|не более|огранич)", text))
-    if mentions_limit and number and (mentions_cpu or "процент" in text):
+    if re.search(r"(убери|сними|отключи|без)\s+лимит", text) and mentions_cpu:
+        settings_action["cpu_limit"] = 100
+    elif mentions_limit and number is not None and (mentions_cpu or "процент" in text):
         settings_action["cpu_limit"] = max(25, min(100, number))
-    if "мощност" in text and number:
+    if "мощност" in text and number is not None:
         settings_action["power"] = max(0, min(100, number))
+    if re.search(r"(кодир\w*|рендер\w*|считай|переключи).*(процессор|cpu)", text):
+        settings_action["encoder"] = "cpu"
+    elif re.search(r"(кодир\w*|рендер\w*|считай|переключи).*(видеокарт|gpu)", text):
+        settings_action["encoder"] = "gpu"
     if "дискретн" in text:
         settings_action["gpu_preference"] = "discrete"
     elif "встроенн" in text and "карт" in text:
@@ -549,11 +562,17 @@ def _start_cut(action: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         if status in ("queued", "preparing", "processing", "running"):
             return {"ok": True, "type": "start_cut", "project_id": project_id,
                     "message": "Нарезка уже идёт — подождите результат."}
+        pipeline.clear_cancel(project_id)
         db.update_project(project_id, options=pipeline.normalize_options(
             {**(project.get("options") or {}), **options}))
         if status in ("new", "", "error", "cancelled"):
+            db.clear_clips(project_id)
+            db.update_project(project_id, status="queued", stage="В очереди", progress=0, error=None)
             jobs.submit_prepare(project_id)
         else:
+            if status != "review":
+                db.clear_clips(project_id)
+            db.update_project(project_id, status="queued", stage="В очереди", progress=0, error=None)
             jobs.submit_process(project_id)
         return {"ok": True, "type": "start_cut", "project_id": project_id,
                 "message": "Запустил нарезку проекта — клипы появятся сами."}

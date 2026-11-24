@@ -92,7 +92,7 @@
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
           Настройки
         </button>
-        <div class="health" id="health"><span class="dot"></span><span id="healthText">Проверка движка…</span><small class="app-version" id="appVersion"></small></div>
+        <div class="health" id="health"><span class="dot"></span><span id="healthText">Проверка движка…</span> <small class="app-version" id="appVersion"></small></div>
         <div class="hint">Всё обрабатывается локально на этом компьютере. Видео никуда не отправляется.</div>
       </div>
     </aside>
@@ -101,7 +101,7 @@
   </div>
 
   <div class="modal hidden" id="modal"></div>
-  <div id="toasts"></div>
+  <div id="toasts" role="region" aria-label="Уведомления" aria-live="polite"></div>
   <input type="file" id="fileInput" accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.m4v,.avi,.ts,.mts,.m2ts,.mp3,.m4a,.wav,.aac,.ogg,.flac" class="hidden" />
   <input type="file" id="fontInput" accept=".ttf,.otf,font/ttf,font/otf" class="hidden" />
 

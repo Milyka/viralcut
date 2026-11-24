@@ -585,8 +585,9 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                                              reactions, scenes)
                 hook = _hook_bonus(window[0]["text"])
                 if hook:
-                    score += hook
-                    parts = {**parts, "hook": round(hook, 1)}
+                    boost = min(0.25, hook * 0.05)
+                    score = round(min(1.0, score + boost), 4)
+                    parts = {**parts, "hook": round(min(1.0, float(parts.get("hook", 0.0)) + boost), 3)}
                 candidates.append({
                     "start": round(w_start, 3), "end": round(w_end, 3),
                     "duration": round(w_end - w_start, 2),

@@ -11,53 +11,44 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/vanwild11/viralcut/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/vanwild11/viralcut/build.yml?branch=main&label=Build&logo=github&style=flat-square" alt="Build"></a>
-  <a href="https://github.com/vanwild11/viralcut/releases/latest"><img src="https://img.shields.io/github/v/release/vanwild11/viralcut?label=Release&color=8b5cf6&style=flat-square" alt="Release"></a>
+  <a href="https://github.com/Milyka/viralcut/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/Milyka/viralcut/build.yml?branch=main&label=Build&logo=github&style=flat-square" alt="Build"></a>
+  <a href="https://github.com/Milyka/viralcut/releases/latest"><img src="https://img.shields.io/github/v/release/Milyka/viralcut?label=Release&color=8b5cf6&style=flat-square" alt="Release"></a>
   <img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/macOS-11%2B-000000?logo=apple&style=flat-square" alt="macOS">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&style=flat-square" alt="Windows">
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&style=flat-square" alt="Python">
-  <a href="https://t.me/ivanAI22"><img src="https://img.shields.io/badge/Telegram-@ivanAI22-2AABEE?logo=telegram&logoColor=white&style=flat-square" alt="Telegram"></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/vanwild11/viralcut/releases/latest"><b>⬇️ Скачать последний релиз</b></a>
+  <a href="https://github.com/Milyka/viralcut/releases/latest"><b>⬇️ Скачать последний релиз</b></a>
   &nbsp;·&nbsp;
   <a href="#установка">Установка</a>
   &nbsp;·&nbsp;
   <a href="#сборка">Сборка</a>
-  &nbsp;·&nbsp;
-  <a href="https://vanwild11.github.io/viralcut/">Сайт</a>
-  &nbsp;·&nbsp;
-  <a href="https://t.me/ivanAI22">Telegram</a>
 </p>
 
 ---
 
-## Скачать ViralCut 1.6
+## Скачать ViralCut 1.6.1
 
 | Платформа | Архив | Как открыть |
 |---|---|---|
-| **macOS 12+ · Apple Silicon** | [ZIP для M‑серии][mac-arm] | Распакуйте и перенесите `ViralCut.app` в «Программы» |
-| **macOS 12+ · Intel** | [ZIP для Intel][mac-intel] | Распакуйте и перенесите `ViralCut.app` в «Программы» |
 | **Windows 10/11 · x64** | [Переносимый ZIP][windows] | Распакуйте весь архив и запустите `ViralCut.exe` |
 
-В архивы входят FFmpeg, модель Whisper и шрифты. Контрольные суммы и исходники доступны на [странице релиза v1.6.0][release].
+В архив входят FFmpeg, модель Whisper Small и шрифты. Контрольные суммы и исходники доступны на [странице релиза v1.6.1][release].
 
-## Что нового в 1.6
+## Что нового в 1.6.1
 
-| Возможность | Как попробовать |
-|---|---|
-| Помощник с контекстом клипа | Откройте проект и напишите «Покажи таймкоды» или «Сделай субтитры в первом клипе жёлтыми» |
-| Отмена правки агента | Напишите «Отмени последнюю правку». История действует до перезапуска |
-| Выбор качества YouTube | Выберите Full HD 1080p, 720p или 480p. При HTTP 503 ViralCut повторит попытку в выбранном качестве |
-| Субтитры на языке речи | Оставьте «Авто» или явно выберите русский либо английский |
-| Новые шрифты | В списке субтитров появились Geologica Bold, IBM Plex Sans Condensed SemiBold и Rubik Mono One |
+- **16 исправлений стабильности и Windows-совместимости:** исправлены субтитры по центру и `sub_free`, экспорт ZIP в десктопе, ручные клипы по таймкоду, снятие лимита CPU (Windows Job Object) и очистка реестра GPU, лимит загрузки 64 ГБ, перемотка в редакторе, удаление API-ключа ИИ, все шрифты/цвета и отмена правок в помощнике, закрытие пайпов FFmpeg и совместимость с OpenCV 5.
+- **Локальные файлы без копирования:** нативный выбор видео/аудио открывает файл напрямую или через жёсткую ссылку (без дублирования на диске).
+- **Авто-CUDA для Whisper:** автоматическое использование NVIDIA GPU с плавным откатом на CPU.
+- **Окно стримера (PiP):** предпросмотр кадра исходника с рамкой камеры и кнопка «Найти камеру».
+- **Перетаскивание субтитров:** свободную позицию субтитров можно задать мышью прямо в предпросмотре шаблона.
+- **Диск и кэш:** автоудаление временного `audio16k.wav` и раздел очистки временных файлов и исходников в настройках.
+- **Управление клипами:** удаление отдельных клипов и кнопка «Ко всем клипам» в редакторе.
 
-[release]: https://github.com/vanwild11/viralcut/releases/tag/v1.6.0
-[mac-arm]: https://github.com/vanwild11/viralcut/releases/download/v1.6.0/ViralCut-1.6.0-macOS-arm64.zip
-[mac-intel]: https://github.com/vanwild11/viralcut/releases/download/v1.6.0/ViralCut-1.6.0-macOS-x86_64.zip
-[windows]: https://github.com/vanwild11/viralcut/releases/download/v1.6.0/ViralCut-1.6.0-windows-x64-portable.zip
+[release]: https://github.com/Milyka/viralcut/releases/tag/v1.6.1
+[windows]: https://github.com/Milyka/viralcut/releases/download/v1.6.1/ViralCut-1.6.1-windows-x64.zip
 
 ## Почему ViralCut
 

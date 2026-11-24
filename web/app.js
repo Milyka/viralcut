@@ -2361,7 +2361,7 @@ function renderUpdate(data) {
     card.hidden = true;
     return;
   }
-  const url = data.url || "https://github.com/vanwild11/viralcut/releases/latest";
+  const url = data.url || "https://github.com/Milyka/viralcut/releases/latest";
   card.href = url;
   card.setAttribute("data-external", url);
   $("#updateTitle").textContent = `Доступна версия ${data.latest}`;

@@ -24,8 +24,8 @@ from ._version import __version__
 from .config import DATA_DIR
 
 STATE_FILE = DATA_DIR / "update.json"
-DEFAULT_API = "https://api.github.com/repos/vanwild11/viralcut/releases/latest"
-RELEASES_PAGE = "https://github.com/vanwild11/viralcut/releases/latest"
+DEFAULT_API = "https://api.github.com/repos/Milyka/viralcut/releases/latest"
+RELEASES_PAGE = "https://github.com/Milyka/viralcut/releases/latest"
 # Проверяем не чаще, чем раз в 6 часов; форс-запрос — по кнопке.
 TTL_SECONDS = float(os.environ.get("VIRALCUT_UPDATE_TTL", str(6 * 3600)))
 TIMEOUT_SECONDS = 5.0

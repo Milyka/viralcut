@@ -417,7 +417,7 @@ class TestBotWhitelistAndCallbacks(unittest.TestCase):
                     }, conf)
                 self.assertEqual(db.get_clip(clip["id"])["approval_status"], "skipped")
 
-                # 4. Авторизованный Regenerate Hook → вызывает jobs.submit_rerender
+                # 4. Авторизованный Regenerate Hook → вызывает jobs.submit_rerender (в фоне после answerCallbackQuery)
                 with mock.patch.object(bot_notify, "_http_json", return_value={"ok": True}), \
                      mock.patch.object(bot_notify.jobs, "submit_rerender", return_value=True) as rerender_mock, \
                      mock.patch.object(bot_notify, "_watch_rerender_and_push"):
@@ -429,6 +429,10 @@ class TestBotWhitelistAndCallbacks(unittest.TestCase):
                             "data": f"rehook:{clip['id']}",
                         },
                     }, conf)
+                    import time as _time
+                    deadline = _time.monotonic() + 2.0
+                    while not rerender_mock.called and _time.monotonic() < deadline:
+                        _time.sleep(0.02)
                     rerender_mock.assert_called_once()
                     args = rerender_mock.call_args[0]
                     self.assertEqual(args[0], clip["id"])

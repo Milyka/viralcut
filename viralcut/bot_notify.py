@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
+import random
 import re
 import sys
 import threading
@@ -25,17 +27,26 @@ from .config import PROJECTS_DIR
 TG_MAX_VIDEO_BYTES = 45 * 1024 * 1024  # 45 МБ (< 50 МБ лимит Telegram Bot API)
 DC_MAX_VIDEO_BYTES = 24 * 1024 * 1024  # 24 МБ (< 25 МБ лимит Discord)
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_TG_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
 _STATE_LOCK = threading.Lock()
-_STOP_EVENT = threading.Event()
 _TG_THREAD: Optional[threading.Thread] = None
+_TG_STOP: Optional[threading.Event] = None
 _DC_THREAD: Optional[threading.Thread] = None
+_DC_STOP: Optional[threading.Event] = None
 _TG_OFFSET: int = 0
+_TG_TOKEN_HASH: str = ""
 _SEEN_UPDATES: Set[int] = set()
 _STATUS: Dict[str, Any] = {
     "telegram": {"running": False, "last_error": "", "bot_username": ""},
     "discord": {"running": False, "last_error": "", "bot_username": ""},
 }
+
+
+def _safe_err(exc: Any, limit: int = 180) -> str:
+    """Убирает Telegram bot token из любых текстов ошибок, логов и статусов."""
+    text = _TG_TOKEN_RE.sub("bot***", str(exc or ""))
+    return text[:limit]
 
 
 # --- Строгий fail-closed контроль доступа -----------------------------------
@@ -179,7 +190,6 @@ def _regenerate_hook_and_caption(clip: Dict[str, Any]) -> Tuple[str, str]:
                     return nh, nc or str(clip.get("caption") or "")
     except Exception:
         pass
-    # Локальный fallback без ИИ: берём другую часть речи или перестраиваем хук
     tokens = [t for t in transcript.split() if len(t) > 1]
     if len(tokens) >= 6:
         mid = max(1, len(tokens) // 3)
@@ -190,19 +200,22 @@ def _regenerate_hook_and_caption(clip: Dict[str, Any]) -> Tuple[str, str]:
     return fallback[:80], str(clip.get("caption") or "")
 
 
-def _watch_rerender_and_push(cid: str) -> None:
-    """Ждёт окончания перерендера после Regenerate Hook и отправляет обновлённый клип."""
-    deadline = time.time() + 240.0
-    while time.time() < deadline and not _STOP_EVENT.is_set():
-        time.sleep(2.5)
+def _watch_rerender_and_push(cid: str, prev_updated_at: float = 0.0,
+                             *, poll_interval: float = 2.5, timeout: float = 240.0) -> bool:
+    """Ждёт завершения перерендера после Regenerate Hook (только свежее updated_at > prev_updated_at)."""
+    deadline = time.time() + max(0.2, float(timeout))
+    while time.time() < deadline:
+        time.sleep(max(0.01, float(poll_interval)))
         clip = db.get_clip(cid)
         if not clip:
-            return
-        if clip.get("status") == "ready":
+            return False
+        cur_updated = float(clip.get("updated_at") or 0.0)
+        if clip.get("status") == "ready" and cur_updated > float(prev_updated_at):
             notify_clip_ready(cid)
-            return
-        if clip.get("status") == "error":
-            return
+            return True
+        if clip.get("status") == "error" and cur_updated > float(prev_updated_at):
+            return False
+    return False
 
 
 def handle_clip_action(action: str, cid: str) -> Dict[str, Any]:
@@ -216,17 +229,21 @@ def handle_clip_action(action: str, cid: str) -> Dict[str, Any]:
             exp = pipeline.export_approved_clip(cid)
             return {"ok": True, "status": "approved", "label": "Approved", "export": exp}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": True, "status": "approved", "label": f"Approved (без экспорта: {str(exc)[:80]})"}
+            return {"ok": True, "status": "approved", "label": f"Approved (без экспорта: {_safe_err(exc, 80)})"}
     if action == "skip":
         db.set_clip_approval(cid, "skipped")
         return {"ok": True, "status": "skipped", "label": "Skipped"}
     if action == "rehook":
         new_hook, new_caption = _regenerate_hook_and_caption(clip)
-        db.set_clip_approval(cid, "pending")
+        updated_clip = db.set_clip_approval(cid, "pending") or clip
+        prev_updated_at = float(updated_clip.get("updated_at") or clip.get("updated_at") or 0.0)
         submitted = jobs.submit_rerender(cid, {"hook": new_hook, "caption": new_caption})
         if submitted:
             threading.Thread(
-                target=_watch_rerender_and_push, args=(cid,), name=f"bot-rehook-{cid[:6]}", daemon=True
+                target=_watch_rerender_and_push,
+                args=(cid, prev_updated_at),
+                name=f"bot-rehook-{cid[:6]}",
+                daemon=True,
             ).start()
         return {"ok": True, "status": "rehook", "label": f"Regenerating: {new_hook[:48]}", "hook": new_hook}
     return {"ok": False, "label": "Неизвестное действие"}
@@ -245,7 +262,10 @@ def handle_url_submission(url: str) -> Dict[str, Any]:
     base_opts["bot_deliver"] = True
     opts = pipeline.normalize_options(base_opts)
     project = db.create_project(url, opts)
-    jobs.submit_prepare(project["id"])
+    if opts.get("cut_mode") == "stream":
+        jobs.submit_stream(project["id"], opts)
+    else:
+        jobs.submit_prepare(project["id"])
     return {"ok": True, "project_id": project["id"]}
 
 
@@ -295,6 +315,24 @@ def send_clip_telegram(cid: str, conf: Optional[Dict[str, Any]] = None) -> Dict[
     return {"ok": bool(resp.get("ok")), "result": resp.get("result")}
 
 
+def _tg_edit_caption(token: str, msg: Dict[str, Any], label: str) -> None:
+    chat_id = (msg.get("chat") or {}).get("id")
+    msg_id = msg.get("message_id")
+    if not chat_id or not msg_id:
+        return
+    old_cap = str(msg.get("caption") or "").split("\n\nStatus:")[0]
+    new_cap = f"{old_cap}\n\nStatus: [{label}]"[:1000]
+    try:
+        _http_json(_tg_url(token, "editMessageCaption"), method="POST", payload={
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "caption": new_cap,
+            "reply_markup": {"inline_keyboard": []},
+        })
+    except Exception:
+        pass
+
+
 def process_telegram_update(update: Dict[str, Any], conf: Dict[str, Any]) -> bool:
     """Обрабатывает один Telegram update с обязательной проверкой белого списка."""
     token = str(conf.get("tg_token") or "").strip()
@@ -311,29 +349,27 @@ def process_telegram_update(update: Dict[str, Any], conf: Dict[str, Any]) -> boo
         data = str(cb.get("data") or "")
         if ":" not in data:
             return False
-        action, cid = data.split(":", 1)
-        res = handle_clip_action(action.strip(), cid.strip())
+        action, cid = (part.strip() for part in data.split(":", 1))
+        msg = cb.get("message") or {}
+
+        # Отвечаем на callback сразу, чтобы Telegram не крутил спиннер и не таймаутил
+        ack_label = "Regenerating hook…" if action == "rehook" else ("Approved" if action == "approve" else "Skipped")
         try:
             _http_json(_tg_url(token, "answerCallbackQuery"), method="POST",
-                       payload={"callback_query_id": cb_id, "text": res.get("label", "OK")[:180]})
+                       payload={"callback_query_id": cb_id, "text": ack_label[:180]})
         except Exception:
             pass
-        msg = cb.get("message") or {}
-        chat_id = (msg.get("chat") or {}).get("id")
-        msg_id = msg.get("message_id")
-        if chat_id and msg_id:
-            status_tag = f"[{res.get('label', action)}]"
-            old_cap = str(msg.get("caption") or "").split("\n\nStatus:")[0]
-            new_cap = f"{old_cap}\n\nStatus: {status_tag}"[:1000]
-            try:
-                _http_json(_tg_url(token, "editMessageCaption"), method="POST", payload={
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "caption": new_cap,
-                    "reply_markup": {"inline_keyboard": []},
-                })
-            except Exception:
-                pass
+
+        if action == "rehook":
+            def _bg_rehook() -> None:
+                res = handle_clip_action("rehook", cid)
+                _tg_edit_caption(token, msg, str(res.get("label") or "Regenerating"))
+
+            threading.Thread(target=_bg_rehook, name=f"tg-rehook-{cid[:6]}", daemon=True).start()
+            return True
+
+        res = handle_clip_action(action, cid)
+        _tg_edit_caption(token, msg, str(res.get("label") or action))
         return True
 
     msg = update.get("message")
@@ -377,32 +413,37 @@ def process_telegram_update(update: Dict[str, Any], conf: Dict[str, Any]) -> boo
     return False
 
 
-def _tg_poll_loop() -> None:
-    global _TG_OFFSET
+def _tg_poll_loop(stop_evt: threading.Event) -> None:
+    global _TG_OFFSET, _TG_TOKEN_HASH
     backoff = 2.0
     webhook_cleared = False
-    while not _STOP_EVENT.is_set():
+    while not stop_evt.is_set():
         conf = app_settings.get()
         token = str(conf.get("tg_token") or "").strip()
         if not conf.get("tg_enabled") or not token:
-            with _STATE_LOCK:
-                _STATUS["telegram"]["running"] = False
             break
+        tok_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
         with _STATE_LOCK:
             _STATUS["telegram"]["running"] = True
+            if tok_hash != _TG_TOKEN_HASH:
+                _TG_TOKEN_HASH = tok_hash
+                _TG_OFFSET = 0
+                _SEEN_UPDATES.clear()
+                webhook_cleared = False
         if not webhook_cleared:
             try:
-                _http_json(_tg_url(token, "deleteWebhook"), method="POST", payload={"drop_pending_updates": False}, timeout=12)
+                _http_json(_tg_url(token, "deleteWebhook"), method="POST",
+                           payload={"drop_pending_updates": False}, timeout=12)
                 webhook_cleared = True
             except Exception:
                 pass
         try:
             params = urllib.parse.urlencode({
-                "timeout": 30,
+                "timeout": 15,
                 "offset": _TG_OFFSET,
                 "allowed_updates": json.dumps(["message", "callback_query"]),
             })
-            data = _http_json(_tg_url(token, f"getUpdates?{params}"), timeout=38)
+            data = _http_json(_tg_url(token, f"getUpdates?{params}"), timeout=22)
             backoff = 2.0
             with _STATE_LOCK:
                 _STATUS["telegram"]["last_error"] = ""
@@ -422,11 +463,12 @@ def _tg_poll_loop() -> None:
                         pass
         except Exception as exc:  # noqa: BLE001
             with _STATE_LOCK:
-                _STATUS["telegram"]["last_error"] = str(exc)[:180]
-            _STOP_EVENT.wait(backoff)
+                _STATUS["telegram"]["last_error"] = _safe_err(exc)
+            stop_evt.wait(backoff)
             backoff = min(30.0, backoff * 2.0)
     with _STATE_LOCK:
-        _STATUS["telegram"]["running"] = False
+        if _TG_STOP is stop_evt:
+            _STATUS["telegram"]["running"] = False
 
 
 # --- Discord Gateway v10 + REST v10 ------------------------------------------
@@ -471,7 +513,7 @@ def send_clip_discord(cid: str, conf: Optional[Dict[str, Any]] = None) -> Dict[s
 
 
 def process_discord_interaction(payload: Dict[str, Any], conf: Dict[str, Any]) -> bool:
-    """Обрабатывает Discord INTERACTION_CREATE (нажатие кнопок) с fail-closed проверкой."""
+    """Обрабатывает Discord INTERACTION_CREATE (нажатие кнопок) с мгновенным DEFERRED ACK (type 6)."""
     if int(payload.get("type") or 0) != 3:  # MESSAGE_COMPONENT
         return False
     user = (payload.get("member") or {}).get("user") or payload.get("user") or {}
@@ -480,29 +522,49 @@ def process_discord_interaction(payload: Dict[str, Any], conf: Dict[str, Any]) -
     cid_raw = str((payload.get("data") or {}).get("custom_id") or "")
     if ":" not in cid_raw:
         return False
-    action, cid = cid_raw.split(":", 1)
-    res = handle_clip_action(action.strip(), cid.strip())
+    action, cid = (part.strip() for part in cid_raw.split(":", 1))
     inter_id = str(payload.get("id") or "")
     inter_tok = str(payload.get("token") or "")
+    app_id = str(payload.get("application_id") or "")
+
+    # 1. Мгновенно отвечаем type: 6 (DEFERRED_UPDATE_MESSAGE), чтобы избежать 3s timeout Discord
     if inter_id and inter_tok:
-        old_content = str((payload.get("message") or {}).get("content") or "").split("\n\nStatus:")[0]
-        new_content = f"{old_content}\n\nStatus: [{res.get('label', action)}]"[:1950]
         try:
             _http_json(
                 f"{_DC_API}/interactions/{inter_id}/{inter_tok}/callback",
                 method="POST",
-                payload={"type": 7, "data": {"content": new_content, "components": []}},
+                payload={"type": 6},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    # 2. Выполняем действие
+    res = handle_clip_action(action, cid)
+
+    # 3. Обновляем исходное сообщение через interaction webhook PATCH
+    if app_id and inter_tok:
+        old_content = str((payload.get("message") or {}).get("content") or "").split("\n\nStatus:")[0]
+        new_content = f"{old_content}\n\nStatus: [{res.get('label', action)}]"[:1950]
+        try:
+            _http_json(
+                f"{_DC_API}/webhooks/{app_id}/{inter_tok}/messages/@original",
+                method="PATCH",
+                payload={"content": new_content, "components": []},
+                timeout=15,
             )
         except Exception:
             pass
     return True
 
 
-async def _dc_gateway_session(token: str) -> None:
+async def _dc_gateway_session(token: str, stop_evt: threading.Event) -> None:
     import websockets
 
     uri = "wss://gateway.discord.gg/?v=10&encoding=json"
     seq: Optional[int] = None
+    ack_received = True
+    zombie_closed = False
 
     async with websockets.connect(uri, max_size=4 * 1024 * 1024) as ws:
         hello_raw = await asyncio.wait_for(ws.recv(), timeout=15)
@@ -513,22 +575,33 @@ async def _dc_gateway_session(token: str) -> None:
             "op": 2,
             "d": {
                 "token": token,
-                "intents": 512,  # GUILD_MESSAGES (достаточно для interaction events без privileged intents)
+                "intents": 0,  # INTERACTION_CREATE приходит без privileged intents
                 "properties": {"os": sys.platform, "browser": "KrlzCut", "device": "KrlzCut"},
             },
         }))
 
         async def _heartbeat() -> None:
-            while not _STOP_EVENT.is_set():
-                await asyncio.sleep(hb_interval)
+            nonlocal ack_received, zombie_closed
+            first_delay = hb_interval * random.random()
+            await asyncio.sleep(max(0.5, first_delay))
+            while not stop_evt.is_set():
+                if not ack_received:
+                    zombie_closed = True
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    break
+                ack_received = False
                 try:
                     await ws.send(json.dumps({"op": 1, "d": seq}))
                 except Exception:
                     break
+                await asyncio.sleep(hb_interval)
 
         hb_task = asyncio.create_task(_heartbeat())
         try:
-            while not _STOP_EVENT.is_set():
+            while not stop_evt.is_set() and not zombie_closed:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
                 except asyncio.TimeoutError:
@@ -537,8 +610,12 @@ async def _dc_gateway_session(token: str) -> None:
                 if msg.get("s") is not None:
                     seq = msg["s"]
                 op = msg.get("op")
-                if op == 1:
+                if op == 11:  # HEARTBEAT_ACK
+                    ack_received = True
+                elif op == 1:  # HEARTBEAT request
                     await ws.send(json.dumps({"op": 1, "d": seq}))
+                elif op in (7, 9):  # RECONNECT / INVALID_SESSION
+                    break
                 elif op == 0 and msg.get("t") == "INTERACTION_CREATE":
                     conf = app_settings.get()
                     try:
@@ -549,27 +626,26 @@ async def _dc_gateway_session(token: str) -> None:
             hb_task.cancel()
 
 
-def _dc_gateway_loop() -> None:
+def _dc_gateway_loop(stop_evt: threading.Event) -> None:
     backoff = 3.0
-    while not _STOP_EVENT.is_set():
+    while not stop_evt.is_set():
         conf = app_settings.get()
         token = str(conf.get("dc_token") or "").strip()
         if not conf.get("dc_enabled") or not token:
-            with _STATE_LOCK:
-                _STATUS["discord"]["running"] = False
             break
         with _STATE_LOCK:
             _STATUS["discord"]["running"] = True
         try:
-            asyncio.run(_dc_gateway_session(token))
+            asyncio.run(_dc_gateway_session(token, stop_evt))
             backoff = 3.0
         except Exception as exc:  # noqa: BLE001
             with _STATE_LOCK:
-                _STATUS["discord"]["last_error"] = str(exc)[:180]
-            _STOP_EVENT.wait(backoff)
+                _STATUS["discord"]["last_error"] = _safe_err(exc)
+            stop_evt.wait(backoff)
             backoff = min(30.0, backoff * 2.0)
     with _STATE_LOCK:
-        _STATUS["discord"]["running"] = False
+        if _DC_STOP is stop_evt:
+            _STATUS["discord"]["running"] = False
 
 
 # --- Жизненный цикл и публичные функции -------------------------------------
@@ -581,12 +657,12 @@ def notify_clip_ready(cid: str) -> Dict[str, Any]:
         try:
             results["telegram"] = send_clip_telegram(cid, conf)
         except Exception as exc:  # noqa: BLE001
-            results["telegram"] = {"ok": False, "error": str(exc)[:180]}
+            results["telegram"] = {"ok": False, "error": _safe_err(exc)}
     if conf.get("dc_enabled") and str(conf.get("dc_token") or "").strip():
         try:
             results["discord"] = send_clip_discord(cid, conf)
         except Exception as exc:  # noqa: BLE001
-            results["discord"] = {"ok": False, "error": str(exc)[:180]}
+            results["discord"] = {"ok": False, "error": _safe_err(exc)}
     return results
 
 
@@ -605,13 +681,13 @@ def test_bot(platform: str) -> Dict[str, Any]:
         try:
             data = _http_json(_tg_url(token, "getMe"), timeout=12)
             if not data.get("ok"):
-                return {"ok": False, "error": str(data.get("description") or "Ошибка Telegram API")}
+                return {"ok": False, "error": _safe_err(data.get("description") or "Ошибка Telegram API")}
             uname = (data.get("result") or {}).get("username") or ""
             with _STATE_LOCK:
                 _STATUS["telegram"]["bot_username"] = uname
             return {"ok": True, "username": uname}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)[:180]}
+            return {"ok": False, "error": _safe_err(exc)}
     if plat == "discord":
         token = str(conf.get("dc_token") or "").strip()
         if not token:
@@ -625,7 +701,7 @@ def test_bot(platform: str) -> Dict[str, Any]:
                 _STATUS["discord"]["bot_username"] = uname
             return {"ok": True, "username": uname}
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)[:180]}
+            return {"ok": False, "error": _safe_err(exc)}
     return {"ok": False, "error": "Неизвестная платформа (telegram | discord)"}
 
 
@@ -653,24 +729,37 @@ def status() -> Dict[str, Any]:
 
 
 def start_bots() -> None:
-    global _TG_THREAD, _DC_THREAD
+    global _TG_THREAD, _TG_STOP, _DC_THREAD, _DC_STOP
     conf = app_settings.get()
-    _STOP_EVENT.clear()
-    if conf.get("tg_enabled") and str(conf.get("tg_token") or "").strip():
-        if _TG_THREAD is None or not _TG_THREAD.is_alive():
-            _TG_THREAD = threading.Thread(target=_tg_poll_loop, name="tg-approval-bot", daemon=True)
-            _TG_THREAD.start()
-    if conf.get("dc_enabled") and str(conf.get("dc_token") or "").strip():
-        if _DC_THREAD is None or not _DC_THREAD.is_alive():
-            _DC_THREAD = threading.Thread(target=_dc_gateway_loop, name="dc-approval-bot", daemon=True)
-            _DC_THREAD.start()
+    with _STATE_LOCK:
+        if conf.get("tg_enabled") and str(conf.get("tg_token") or "").strip():
+            if _TG_THREAD is None or not _TG_THREAD.is_alive() or (_TG_STOP and _TG_STOP.is_set()):
+                stop_evt = threading.Event()
+                _TG_STOP = stop_evt
+                _TG_THREAD = threading.Thread(
+                    target=_tg_poll_loop, args=(stop_evt,), name="tg-approval-bot", daemon=True
+                )
+                _TG_THREAD.start()
+        if conf.get("dc_enabled") and str(conf.get("dc_token") or "").strip():
+            if _DC_THREAD is None or not _DC_THREAD.is_alive() or (_DC_STOP and _DC_STOP.is_set()):
+                stop_evt = threading.Event()
+                _DC_STOP = stop_evt
+                _DC_THREAD = threading.Thread(
+                    target=_dc_gateway_loop, args=(stop_evt,), name="dc-approval-bot", daemon=True
+                )
+                _DC_THREAD.start()
 
 
 def stop_bots() -> None:
-    _STOP_EVENT.set()
-    for t in (_TG_THREAD, _DC_THREAD):
-        if t is not None and t.is_alive():
-            t.join(timeout=2.0)
+    with _STATE_LOCK:
+        stops = [evt for evt in (_TG_STOP, _DC_STOP) if evt is not None]
+        threads = [t for t in (_TG_THREAD, _DC_THREAD) if t is not None and t.is_alive()]
+        _STATUS["telegram"]["running"] = False
+        _STATUS["discord"]["running"] = False
+    for evt in stops:
+        evt.set()
+    for t in threads:
+        t.join(timeout=2.0)
 
 
 def restart_bots() -> None:

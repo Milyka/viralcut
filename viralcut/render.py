@@ -767,12 +767,13 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                     f";[{bgm_idx}:a]atrim=0:{duration:.3f},asetpts=PTS-STARTPTS,{_AFMT},"
                     f"volume={vol_db:.1f}dB,afade=t=in:st=0:d=0.6,afade=t=out:st={bgm_fo:.3f}:d=1.0[bgm_pre]"
                 )
-                if info["has_audio"] and bgm_cfg.get("ducking", True):
-                    drop = max(4.0, abs(float(bgm_cfg.get("duck_db", -22.0)) - vol_db))
-                    ratio = max(4, min(14, int(round(drop))))
+                drop_db = max(0.0, vol_db - float(bgm_cfg.get("duck_db", -22.0)))
+                if info["has_audio"] and bgm_cfg.get("ducking", True) and drop_db >= 1.0:
+                    threshold = round(max(0.015, min(0.08, 0.06 - drop_db * 0.0025)), 4)
+                    ratio = max(2, min(20, int(round(drop_db))))
                     graph += (
                         f";[amain]asplit=2[voice][voicemix];"
-                        f"[bgm_pre][voice]sidechaincompress=threshold=0.04:ratio={ratio}:attack=15:release=350:makeup=1[bgm_ducked]"
+                        f"[bgm_pre][voice]sidechaincompress=threshold={threshold}:ratio={ratio}:attack=15:release=350:makeup=1[bgm_ducked]"
                     )
                     mix_inputs = ["[voicemix]", "[bgm_ducked]"]
                     if game_has_audio:
@@ -884,7 +885,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             cmd = _compose(_video_args(encoder, crf, preset, rq), filters, staged)
             if os.environ.get("VIRALCUT_DEBUG_RENDER"):
                 print("[render] cmd:", " ".join(cmd), file=sys.stderr, flush=True)
-            code, tail, stop_reason = _run_encode(cmd, duration, on_progress if attempt == 0 else None)
+            encode_dur = total_duration if has_bumpers else duration
+            code, tail, stop_reason = _run_encode(cmd, encode_dur, on_progress if attempt == 0 else None)
             tail_text = "".join(tail)
             if stop_reason and not ((try_other_gpu or notify_gpu_fallback) and encoder):
                 break

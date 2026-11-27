@@ -12,6 +12,7 @@ import json
 import os
 import random
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -170,7 +171,7 @@ def add_clip(filename: str, data_path: Path, tags: Any = None) -> Dict[str, Any]
     cid = "game_" + hashlib.sha1(f"{clean_name}:{time.time()}".encode("utf-8")).hexdigest()[:10]
     GAME_DIR.mkdir(parents=True, exist_ok=True)
     target = GAME_DIR / f"{cid}{suffix}"
-    data_path.replace(target)
+    shutil.move(str(data_path), str(target))
     clean_tags = _clean_tags(tags)
     entry = {
         "id": cid,

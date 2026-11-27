@@ -551,7 +551,9 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
         if "encoder" in patch or "gpu_preference" in patch:
             render.reset_hw_encoder()
         if any(k.startswith(("tg_", "dc_", "clear_tg_", "clear_dc_")) for k in patch):
-            bot_notify.restart_bots()
+            import threading as _threading
+
+            _threading.Thread(target=bot_notify.restart_bots, name="bots-restart", daemon=True).start()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     data = app_settings.public(data)
@@ -864,10 +866,17 @@ async def brand_assets_upload(
     name: str = Form(""),
     file: UploadFile = File(...),
 ) -> Dict[str, Any]:
+    k = str(kind or "").strip().lower()
+    if k not in ("watermark", "intro", "outro"):
+        raise HTTPException(400, "Тип ассета должен быть watermark, intro или outro")
     suffix = Path(file.filename or "").suffix.lower()
+    if k == "watermark" and suffix not in profiles.WATERMARK_SUFFIXES:
+        raise HTTPException(400, "Для водяного знака поддерживаются только PNG и WebP")
+    if k in ("intro", "outro") and suffix not in profiles.BUMPER_SUFFIXES:
+        raise HTTPException(400, "Для интро/аутро поддерживаются MP4, MOV и WebM")
     profiles.BRAND_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = profiles.BRAND_ASSETS_DIR / f".upload-{uuid.uuid4().hex[:8]}{suffix}"
-    limit = profiles.MAX_WATERMARK_BYTES if kind == "watermark" else profiles.MAX_BUMPER_BYTES
+    limit = profiles.MAX_WATERMARK_BYTES if k == "watermark" else profiles.MAX_BUMPER_BYTES
     written = 0
     try:
         with tmp.open("wb") as out:
@@ -879,7 +888,7 @@ async def brand_assets_upload(
                 if written > limit:
                     raise HTTPException(413, "Файл превышает допустимый размер")
                 out.write(chunk)
-        return profiles.add_asset(kind, file.filename or f"asset{suffix}", tmp, name=name or None)
+        return profiles.add_asset(k, file.filename or f"asset{suffix}", tmp, name=name or None)
     except HTTPException:
         tmp.unlink(missing_ok=True)
         raise

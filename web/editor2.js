@@ -185,6 +185,9 @@
       watermark: s.watermark && typeof s.watermark === "object" ? { ...s.watermark } : null,
       introAssetId: String(s.intro_asset_id || ""),
       outroAssetId: String(s.outro_asset_id || ""),
+      keepWatermark: Boolean(s.watermark && typeof s.watermark === "object" && s.watermark.enabled && s.watermark.asset_id),
+      keepIntro: Boolean(s.intro_asset_id),
+      keepOutro: Boolean(s.outro_asset_id),
       bgm: {
         enabled: Boolean(bgmIn.enabled && defaultBgmId),
         track_id: defaultBgmId,
@@ -204,6 +207,10 @@
         audio: Boolean(glIn.audio ?? glIn.game_audio),
       },
     };
+
+    const hasInitWm = ed.keepWatermark;
+    const hasInitIntro = ed.keepIntro;
+    const hasInitOutro = ed.keepOutro;
 
     const modal = $("#modal");
     modal.classList.remove("hidden");
@@ -310,9 +317,13 @@
               </div>
               <div id="edGameBody" style="display:${ed.game.enabled ? "flex" : "none"};flex-direction:column;gap:10px">
                 <div style="display:flex;gap:6px;align-items:center">
-                  <select id="edGameClipSel" style="flex:1;height:36px;padding:0 10px;border-radius:10px;background:rgba(255,255,255,0.06);border:1px solid var(--separator)"></select>
+                  <select id="edGameClipSel" style="flex:1;height:36px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border)"></select>
                   <button class="mini-chip" id="edGameUploadBtn" type="button" title="Загрузить свой игровой ролик">+ Видео</button>
                   <button class="mini-chip" id="edGameDelBtn" type="button" title="Удалить выбранный загруженный ролик">✕</button>
+                </div>
+                <div id="edGameTagsRow" style="display:none;gap:6px;align-items:center">
+                  <input id="edGameTagsInput" type="text" placeholder="Теги пула (через запятую: minecraft, gta)" style="flex:1;height:32px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px" />
+                  <button class="mini-chip" id="edGameTagsSaveBtn" type="button">Теги</button>
                 </div>
                 <div>
                   <div class="hint" style="margin-bottom:5px">Пропорция разделения (верх / игра)</div>
@@ -437,7 +448,7 @@
               <div class="insp-card-head">
                 <h4>Фоновая музыка (BGM) и эффекты</h4>
                 <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
-                  <input type="checkbox" id="edBgmOn" ${ed.bgm.enabled ? "checked" : ""} /> BGM
+                  <input type="checkbox" id="edBgmOn" ${ed.bgm.enabled ? "checked" : ""} ${state.bgmTracks.length ? "" : "disabled"} /> BGM
                 </label>
               </div>
               <div style="display:flex;gap:6px;align-items:center">
@@ -464,6 +475,12 @@
                 <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edPunchZoom" ${ed.punchInZoom ? "checked" : ""} /> Hook Punch-In Zoom</label>
                 <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edDualSplit" ${ed.autoDualSplit ? "checked" : ""} /> Авто 2-спикерный сплит</label>
               </div>
+              ${(hasInitWm || hasInitIntro || hasInitOutro) ? `
+              <div style="padding-top:10px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--text)">
+                ${hasInitWm ? `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edKeepWm" ${ed.keepWatermark ? "checked" : ""} /> Водяной знак</label>` : ""}
+                ${hasInitIntro ? `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edKeepIntro" ${ed.keepIntro ? "checked" : ""} /> Интро</label>` : ""}
+                ${hasInitOutro ? `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edKeepOutro" ${ed.keepOutro ? "checked" : ""} /> Аутро</label>` : ""}
+              </div>` : ""}
             </section>
 
             <section class="insp-card">
@@ -511,6 +528,13 @@
       if (chosen) ed.game.clip_id = chosen.id;
       const delBtn = $("#edGameDelBtn");
       if (delBtn) delBtn.disabled = !chosen || Boolean(chosen.builtin);
+      const tagsRow = $("#edGameTagsRow");
+      const tagsInp = $("#edGameTagsInput");
+      if (tagsRow && tagsInp) {
+        const canTag = Boolean(chosen && !chosen.builtin);
+        tagsRow.style.display = canTag ? "flex" : "none";
+        tagsInp.value = canTag && Array.isArray(chosen.tags) ? chosen.tags.join(", ") : "";
+      }
     }
 
     function syncGameVideoSrc() {
@@ -969,6 +993,25 @@
         toast("Ролик удалён");
       } catch (err) { toast(err.message, "err"); }
     });
+    const saveGameTags = async () => {
+      const chosen = state.gameClips.find((c) => c.id === ed.game.clip_id);
+      if (!chosen || chosen.builtin) return;
+      const raw = ($("#edGameTagsInput")?.value || "").trim();
+      const tags = raw ? raw.split(/[,\s;]+/).map((t) => t.trim()).filter(Boolean) : [];
+      try {
+        const updated = await api(`/api/game-clips/${encodeURIComponent(chosen.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({ tags }),
+        });
+        chosen.tags = Array.isArray(updated.tags) ? updated.tags : tags;
+        if ($("#edGameTagsInput")) $("#edGameTagsInput").value = chosen.tags.join(", ");
+        toast("Теги ролика сохранены");
+      } catch (err) { toast(err.message, "err"); }
+    };
+    $("#edGameTagsSaveBtn")?.addEventListener("click", saveGameTags);
+    $("#edGameTagsInput")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveGameTags(); }
+    });
 
     // Numeric trim inputs (expand filmstrip window when edited outside bounds)
     function ensureTrimBounds() {
@@ -1033,6 +1076,8 @@
     // BGM & Effects controls
     function populateBgmSelect() {
       const sel = $("#edBgmSel");
+      const bgmOn = $("#edBgmOn");
+      if (bgmOn) bgmOn.disabled = state.bgmTracks.length === 0;
       if (!sel) return;
       if (!state.bgmTracks.length) {
         sel.innerHTML = `<option value="">Треков пока нет</option>`;
@@ -1054,6 +1099,9 @@
     $("#edBgmDuckOn")?.addEventListener("change", (e) => { ed.bgm.ducking = e.target.checked; });
     $("#edPunchZoom")?.addEventListener("change", (e) => { ed.punchInZoom = e.target.checked; });
     $("#edDualSplit")?.addEventListener("change", (e) => { ed.autoDualSplit = e.target.checked; });
+    $("#edKeepWm")?.addEventListener("change", (e) => { ed.keepWatermark = e.target.checked; });
+    $("#edKeepIntro")?.addEventListener("change", (e) => { ed.keepIntro = e.target.checked; });
+    $("#edKeepOutro")?.addEventListener("change", (e) => { ed.keepOutro = e.target.checked; });
     $("#edBgmUploadBtn")?.addEventListener("click", () => $("#edBgmFile")?.click());
     $("#edBgmFile")?.addEventListener("change", async (e) => {
       const file = e.target.files?.[0];
@@ -1066,7 +1114,8 @@
         await loadBgmList();
         ed.bgm.track_id = added.id;
         ed.bgm.enabled = true;
-        if ($("#edBgmOn")) $("#edBgmOn").checked = true;
+        const bgmOn = $("#edBgmOn");
+        if (bgmOn) { bgmOn.disabled = false; bgmOn.checked = true; }
         populateBgmSelect();
         toast(`Трек добавлен: ${added.name}`);
       } catch (err) { toast(err.message, "err"); }
@@ -1100,9 +1149,12 @@
         punch_in_zoom: ed.punchInZoom,
         auto_dual_split: ed.autoDualSplit,
       };
-      if (ed.watermark) payload.watermark = ed.watermark;
-      if (ed.introAssetId) payload.intro_asset_id = ed.introAssetId;
-      if (ed.outroAssetId) payload.outro_asset_id = ed.outroAssetId;
+      if (hasInitWm) payload.watermark = ed.keepWatermark ? ed.watermark : null;
+      else if (ed.watermark) payload.watermark = ed.watermark;
+      if (hasInitIntro) payload.intro_asset_id = ed.keepIntro ? ed.introAssetId : "";
+      else if (ed.introAssetId) payload.intro_asset_id = ed.introAssetId;
+      if (hasInitOutro) payload.outro_asset_id = ed.keepOutro ? ed.outroAssetId : "";
+      else if (ed.outroAssetId) payload.outro_asset_id = ed.outroAssetId;
       if (ed.textDirty) payload.text = ed.text;
       if (ed.subFree) payload.sub_free = ed.subFree;
       return payload;

@@ -457,7 +457,7 @@ def _ad_overlap(start: float, end: float, intervals: List[Dict[str, Any]]) -> fl
 
 
 def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
-    from . import game_layer
+    from . import bgm, game_layer, profiles
 
     raw_mode = opts.get("mode") or "blur"
     mode = "blur" if raw_mode == "auto" else raw_mode
@@ -480,6 +480,12 @@ def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         "sub_outline_color": opts.get("sub_outline_color", "#000000"),
         "game_layer": game_layer.normalize_config(opts.get("game_layer")),
         "cut_pauses": bool(opts.get("cut_pauses")),
+        "watermark": profiles.normalize_watermark(opts.get("watermark")),
+        "intro_asset_id": str(opts.get("intro_asset_id") or "").strip(),
+        "outro_asset_id": str(opts.get("outro_asset_id") or "").strip(),
+        "bgm": bgm.normalize_config(opts.get("bgm")),
+        "punch_in_zoom": bool(opts.get("punch_in_zoom", False)),
+        "auto_dual_split": bool(opts.get("auto_dual_split", True)),
     }
 
 
@@ -506,6 +512,7 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
     language: Optional[str] = None if raw_lang in ("", "auto") else raw_lang
     processed = 0
     failures = 0
+    last_game_id: Optional[str] = None
     try:
         while True:
             duration = _live_duration(pid)
@@ -604,7 +611,10 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                 audio.unlink(missing_ok=True)
             failures = 0
 
+            from . import bot_notify, game_layer
+
             settings = _settings(opts)
+            pool_cfg = opts.get("game_pool") if isinstance(opts.get("game_pool"), dict) else None
             ready_count = int(meta.get("live_clips") or 0)
             for i, cand in enumerate(found):
                 _check_live_cancel(pid, stop)
@@ -615,6 +625,16 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                           file=sys.stderr, flush=True)
                     continue
                 db.update_project(pid, stage=f"Рендер клипа {i + 1}/{len(found)} · окно {label}")
+                clip_cfg = dict(settings)
+                if pool_cfg and pool_cfg.get("enabled"):
+                    picked = game_layer.pick_random_from_pool(
+                        pool_cfg,
+                        max(1.0, clip_end - clip_start),
+                        exclude_ids=[last_game_id] if last_game_id else None,
+                    )
+                    if picked:
+                        clip_cfg["game_layer"] = picked
+                        last_game_id = picked.get("clip_id")
                 # слова из распознавания окна идут от его начала — храним время эфира,
                 # чтобы клип можно было перерендерить и после окончания записи
                 clip_words = [{**w, "start": round(float(w["start"]) + win_start, 3),
@@ -622,11 +642,16 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                               for w in cand["words"]]
                 clip = db.add_clip(pid, processed + i, clip_start, clip_end, cand["score"],
                                    cand["title"], cand["hook"], cand["caption"], clip_words,
-                                   settings, status="rendering")
+                                   clip_cfg, status="rendering")
                 try:
-                    _render_live_clip(workdir, clip, win_start, settings, opts)
+                    _render_live_clip(workdir, clip, win_start, clip_cfg, opts)
                     db.update_clip(clip["id"], status="ready", error=None)
                     ready_count += 1
+                    if opts.get("bot_deliver"):
+                        try:
+                            bot_notify.notify_clip_ready_async(clip["id"])
+                        except Exception:  # noqa: BLE001
+                            pass
                 except Cancelled:
                     raise
                 except Exception as exc:  # noqa: BLE001

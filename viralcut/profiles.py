@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -129,7 +130,7 @@ def add_asset(kind: str, filename: str, data_path: Path, name: Optional[str] = N
     aid = f"{k[:2]}_{hashlib.sha1(f'{k}:{clean_name}:{time.time()}'.encode('utf-8')).hexdigest()[:10]}"
     BRAND_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     target = BRAND_ASSETS_DIR / f"{aid}{suffix}"
-    data_path.replace(target)
+    shutil.move(str(data_path), str(target))
     entry = {
         "id": aid,
         "kind": k,

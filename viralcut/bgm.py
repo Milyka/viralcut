@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -92,7 +93,7 @@ def add_track(filename: str, data_path: Path, name: Optional[str] = None) -> Dic
     tid = "bgm_" + hashlib.sha1(f"{clean_name}:{time.time()}".encode("utf-8")).hexdigest()[:10]
     BGM_DIR.mkdir(parents=True, exist_ok=True)
     target = BGM_DIR / f"{tid}{suffix}"
-    data_path.replace(target)
+    shutil.move(str(data_path), str(target))
     entry = {
         "id": tid,
         "name": clean_name,

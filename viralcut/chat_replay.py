@@ -229,8 +229,10 @@ def parse_chat_replay(path: Path, duration: float, bin_sec: float = 5.0) -> Opti
     peaks: List[Dict[str, Any]] = []
     min_gap_bins = max(1, int(round(15.0 / bin_sec)))
     for idx in ranked:
-        if zscores[idx] < 1.2 or counts[idx] < 2:
+        if zscores[idx] < 1.2:
             break
+        if counts[idx] < 2:
+            continue
         if any(abs(idx - int(p["_bin"])) < min_gap_bins for p in peaks):
             continue
         peaks.append({
@@ -302,6 +304,8 @@ def load_or_build(workdir: Path, duration: float,
     if result:
         try:
             summary_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+            if target.name.lower().endswith(".live_chat.json"):
+                target.unlink(missing_ok=True)
         except OSError:
             pass
     return result

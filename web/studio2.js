@@ -92,6 +92,14 @@
     if (c.mode) state.opts.mode = c.mode;
     if (c.cut_mode) state.opts.cutMode = c.cut_mode;
     if (c.count != null) state.opts.count = Number(c.count);
+    if (c.min_dur != null || c.max_dur != null || c.target_dur != null) {
+      const matchDur = Object.entries(DUR_PRESETS).find(([, v]) =>
+        (c.min_dur == null || Number(v.min) === Number(c.min_dur)) &&
+        (c.max_dur == null || Number(v.max) === Number(c.max_dur)) &&
+        (c.target_dur == null || Number(v.target) === Number(c.target_dur))
+      );
+      if (matchDur) state.opts.dur = matchDur[0];
+    }
     if (c.language) state.opts.language = c.language;
     if (c.cut_pauses != null) state.opts.cutPauses = Boolean(c.cut_pauses);
     if (c.subtitles != null) state.opts.subtitles = Boolean(c.subtitles);
@@ -102,6 +110,8 @@
     if (c.sub_speed) state.opts.subSpeed = c.sub_speed;
     if (c.sub_anim) state.opts.subAnim = c.sub_anim;
     if (c.accent) state.opts.accent = c.accent;
+    if (c.uppercase != null) state.opts.uppercase = Boolean(c.uppercase);
+    if (c.show_hook != null) state.opts.showHook = Boolean(c.show_hook);
     if (c.sub_outline != null) state.opts.subOutline = Boolean(c.sub_outline);
     if (c.sub_outline_width != null) state.opts.subOutlineWidth = Number(c.sub_outline_width);
     if (c.sub_outline_color) state.opts.subOutlineColor = c.sub_outline_color;
@@ -139,6 +149,8 @@
       sub_speed: o.subSpeed || "calm",
       sub_anim: o.subAnim || "pop",
       accent: o.accent || "yellow",
+      uppercase: o.uppercase !== false,
+      show_hook: o.showHook !== false,
       sub_outline: o.subOutline !== false,
       sub_outline_width: Number(o.subOutlineWidth ?? 7),
       sub_outline_color: o.subOutlineColor || "#000000",
@@ -704,6 +716,13 @@
         const kid = b.dataset.applyKit;
         if (!kid) {
           state.opts.profileId = "";
+          state.opts.watermark = null;
+          state.opts.introAssetId = "";
+          state.opts.outroAssetId = "";
+          state.opts.gamePool = null;
+          state.opts.bgm = null;
+          state.opts.punchInZoom = false;
+          state.opts.botDeliver = false;
           renderNavView(true);
           return;
         }
@@ -1291,39 +1310,42 @@
             <h2>Brand Kits (Профили каналов) и брендовые ассеты</h2>
             <span class="hint">Водяной знак, интро/аутро (до 15 с) и библиотека BGM</span>
           </div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:14px">
-            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:9px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="display:flex;flex-direction:column;gap:10px">
               <b style="font-size:13px">Сохранённые Brand Kits (${ui.profiles.length})</b>
-              ${ui.profiles.length ? ui.profiles.map((k) => `
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-radius:8px;background:var(--surface);border:1px solid var(--border)">
+              ${ui.profiles.length ? `<div style="display:flex;flex-direction:column">` + ui.profiles.map((k) => {
+                const isDef = conf.default_profile_id === k.id;
+                return `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid var(--border)">
                   <div style="min-width:0">
-                    <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.name)} ${conf.default_profile_id === k.id ? `<span class="status-pill done" style="font-size:10px;padding:1px 6px">По умолчанию</span>` : ""}</div>
+                    <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.name)} ${isDef ? `<span class="status-pill done" style="font-size:10px;padding:1px 6px">По умолчанию</span>` : ""}</div>
                     <div class="hint" style="font-size:11.5px">${esc(k.config?.aspect || "9:16")} · ${esc(k.config?.sub_font || "montserrat")}${k.config?.watermark?.enabled ? " · логотип" : ""}${k.config?.bgm?.enabled ? " · BGM" : ""}</div>
                   </div>
                   <div style="display:flex;gap:6px;flex:none">
-                    <button class="mini-chip" data-kit-default="${esc(k.id)}" type="button" title="Использовать по умолчанию для бота">По умолч.</button>
+                    <button class="mini-chip ${isDef ? "active" : ""}" data-kit-default="${esc(k.id)}" data-kit-is-default="${isDef ? "1" : ""}" type="button" title="${isDef ? "Снять профиль по умолчанию" : "Использовать по умолчанию для бота"}">${isDef ? "Снять" : "По умолч."}</button>
+                    <button class="mini-chip" data-kit-update="${esc(k.id)}" type="button" title="Обновить из текущих настроек">Обновить</button>
                     <button class="mini-chip" data-kit-del="${esc(k.id)}" type="button" style="color:#fca5a5">Удалить</button>
                   </div>
-                </div>
-              `).join("") : `<div class="hint">Профилей пока нет — создайте профиль ниже из текущих настроек нового проекта.</div>`}
-              <div style="display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--border)">
-                <input id="kitNewName" type="text" placeholder="Название Brand Kit (например: Подкаст-канал)" style="height:36px;padding:0 11px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:13px" />
+                </div>`;
+              }).join("") + `</div>` : `<div class="hint">Профилей пока нет — создайте профиль ниже из текущих настроек нового проекта.</div>`}
+              <div style="display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:1px solid var(--border)">
+                <input id="kitNewName" type="text" placeholder="Название Brand Kit (например: Подкаст-канал)" style="height:36px;padding:0 11px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:13px" />
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                  <select id="kitWmSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                  <select id="kitWmSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
                     <option value="">Водяной знак: нет</option>
                     ${ui.brandAssets.filter((a) => a.kind === "watermark").map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}
                   </select>
-                  <select id="kitWmPos" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                  <select id="kitWmPos" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
                     <option value="top-right">Угол: сверху справа</option>
                     <option value="top-left">Угол: сверху слева</option>
                     <option value="bottom-right">Угол: снизу справа</option>
                     <option value="bottom-left">Угол: снизу слева</option>
                   </select>
-                  <select id="kitIntroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                  <select id="kitIntroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
                     <option value="">Интро: нет</option>
                     ${ui.brandAssets.filter((a) => a.kind === "intro" || a.kind === "outro").map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${a.duration} с)</option>`).join("")}
                   </select>
-                  <select id="kitOutroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                  <select id="kitOutroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
                     <option value="">Аутро: нет</option>
                     ${ui.brandAssets.filter((a) => a.kind === "outro" || a.kind === "intro").map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${a.duration} с)</option>`).join("")}
                   </select>
@@ -1332,7 +1354,7 @@
               </div>
             </div>
 
-            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;flex-direction:column;gap:10px">
               <b style="font-size:13px">Ассеты и фоновая музыка (BGM)</b>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <button class="mini-chip" id="upWmBtn" type="button">+ Логотип (PNG/WebP)</button>
@@ -1344,20 +1366,20 @@
                 <input id="upOutroFile" type="file" accept=".mp4,.mov,.webm,video/*" class="hidden" />
                 <input id="upBgmFile" type="file" accept=".mp3,.wav,.m4a,.ogg,.flac,audio/*" class="hidden" />
               </div>
-              <div style="display:flex;flex-direction:column;gap:6px;max-height:190px;overflow:auto">
+              <div style="display:flex;flex-direction:column;max-height:210px;overflow:auto">
                 ${ui.brandAssets.map((a) => `
-                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-top:1px solid var(--border);font-size:12px">
                     <span><b>[${esc(a.kind)}]</b> ${esc(a.name)} ${a.duration ? `· ${a.duration} с` : `${a.width}×${a.height}`}</span>
                     <button class="mini-chip" data-del-asset="${esc(a.id)}" type="button" style="color:#fca5a5">Удалить</button>
                   </div>
                 `).join("")}
                 ${ui.bgmTracks.map((t) => `
-                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-top:1px solid var(--border);font-size:12px">
                     <span><b>[BGM]</b> ${esc(t.name)} · ${t.duration} с</span>
                     <button class="mini-chip" data-del-bgm="${esc(t.id)}" type="button" style="color:#fca5a5">Удалить</button>
                   </div>
                 `).join("")}
-                ${!ui.brandAssets.length && !ui.bgmTracks.length ? `<div class="hint">Ассеты и треки BGM ещё не загружены.</div>` : ""}
+                ${!ui.brandAssets.length && !ui.bgmTracks.length ? `<div class="hint" style="padding-top:6px">Ассеты и треки BGM ещё не загружены.</div>` : ""}
               </div>
             </div>
           </div>
@@ -1369,8 +1391,8 @@
             <span class="status-pill ${(ui.botStatus?.telegram?.running || ui.botStatus?.discord?.running) ? "done" : ""}">${(ui.botStatus?.telegram?.running || ui.botStatus?.discord?.running) ? "Активен" : "Остановлен"}</span>
           </div>
           <div class="hint" style="margin-bottom:12px">Локальный исходящий клиент без проброса портов. Доступ строго по белому списку (пустой список блокирует всех пользователей).</div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
-            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="display:flex;flex-direction:column;gap:8px">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <label style="display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;cursor:pointer">
                   <input type="checkbox" id="botTgOn" ${conf.tg_enabled ? "checked" : ""} /> Telegram Bot (Long Polling)
@@ -1378,17 +1400,17 @@
                 <span class="hint">${conf.tg_token_set ? "Токен сохранён" : "Токен не задан"}</span>
               </div>
               <div style="display:flex;gap:6px">
-                <input id="botTgToken" type="password" placeholder="${conf.tg_token_set ? "•••••••• (оставьте пустым, чтобы не менять)" : "Bot Token от @BotFather"}" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+                <input id="botTgToken" type="password" placeholder="${conf.tg_token_set ? "•••••••• (оставьте пустым, чтобы не менять)" : "Bot Token от @BotFather"}" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px" />
                 ${conf.tg_token_set ? `<button class="mini-chip" id="botTgClear" type="button">Очистить</button>` : ""}
               </div>
-              <input id="botTgAllowed" type="text" value="${esc(conf.tg_allowed_users || "")}" placeholder="Разрешённые User ID или @username (через запятую)" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
-              <input id="botTgChatId" type="text" value="${esc(conf.tg_chat_id || "")}" placeholder="Chat ID (необязательно — определится после /start)" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+              <input id="botTgAllowed" type="text" value="${esc(conf.tg_allowed_users || "")}" placeholder="Разрешённые User ID или @username (через запятую)" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px" />
+              <input id="botTgChatId" type="text" value="${esc(conf.tg_chat_id || "")}" placeholder="Chat ID (необязательно — определится после /start)" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px" />
               <div style="display:flex;gap:8px;margin-top:2px">
                 <button class="btn-ghost" id="botTgTest" type="button" style="height:32px;font-size:12px">Проверить Telegram</button>
               </div>
             </div>
 
-            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;flex-direction:column;gap:8px">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <label style="display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;cursor:pointer">
                   <input type="checkbox" id="botDcOn" ${conf.dc_enabled ? "checked" : ""} /> Discord Bot (Gateway v10)
@@ -1396,17 +1418,17 @@
                 <span class="hint">${conf.dc_token_set ? "Токен сохранён" : "Токен не задан"}</span>
               </div>
               <div style="display:flex;gap:6px">
-                <input id="botDcToken" type="password" placeholder="${conf.dc_token_set ? "•••••••• (оставьте пустым, чтобы не менять)" : "Discord Bot Token"}" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+                <input id="botDcToken" type="password" placeholder="${conf.dc_token_set ? "•••••••• (оставьте пустым, чтобы не менять)" : "Discord Bot Token"}" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px" />
                 ${conf.dc_token_set ? `<button class="mini-chip" id="botDcClear" type="button">Очистить</button>` : ""}
               </div>
-              <input id="botDcChannel" type="text" value="${esc(conf.dc_channel_id || "")}" placeholder="Channel ID для отправки превью" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
-              <input id="botDcAllowed" type="text" value="${esc(conf.dc_allowed_users || "")}" placeholder="Разрешённые Discord User ID или @username" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+              <input id="botDcChannel" type="text" value="${esc(conf.dc_channel_id || "")}" placeholder="Channel ID для отправки превью" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px" />
+              <input id="botDcAllowed" type="text" value="${esc(conf.dc_allowed_users || "")}" placeholder="Разрешённые Discord User ID или @username" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px" />
               <div style="display:flex;gap:8px;margin-top:2px">
                 <button class="btn-ghost" id="botDcTest" type="button" style="height:32px;font-size:12px">Проверить Discord</button>
               </div>
             </div>
           </div>
-          <div style="display:flex;justify-content:flex-end;margin-top:12px">
+          <div style="display:flex;justify-content:flex-end;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
             <button class="btn-primary" id="botSaveBtn" type="button">Сохранить настройки ботов</button>
           </div>
         </div>
@@ -1585,9 +1607,34 @@
     });
     $$("[data-kit-default]").forEach((btn) => {
       btn.addEventListener("click", async () => {
+        const nextId = btn.dataset.kitIsDefault === "1" ? "" : btn.dataset.kitDefault;
         try {
-          await api("/api/settings", { method: "POST", body: JSON.stringify({ default_profile_id: btn.dataset.kitDefault }) });
-          toast("Профиль по умолчанию обновлён");
+          await api("/api/settings", { method: "POST", body: JSON.stringify({ default_profile_id: nextId }) });
+          toast(nextId ? "Профиль по умолчанию обновлён" : "Профиль по умолчанию снят");
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+      });
+    });
+    $$("[data-kit-update]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const kid = btn.dataset.kitUpdate;
+        const existing = ui.profiles.find((p) => p.id === kid);
+        if (!existing) return;
+        const cfg = currentOptsAsKitConfig();
+        const wmId = $("#kitWmSel")?.value || "";
+        if (wmId) {
+          cfg.watermark = { enabled: true, asset_id: wmId, position: $("#kitWmPos")?.value || "top-right", scale: 0.16, opacity: 0.85, margin: 36 };
+        } else if (existing.config?.watermark) {
+          cfg.watermark = existing.config.watermark;
+        }
+        const introVal = $("#kitIntroSel")?.value || "";
+        const outroVal = $("#kitOutroSel")?.value || "";
+        cfg.intro_asset_id = introVal || existing.config?.intro_asset_id || "";
+        cfg.outro_asset_id = outroVal || existing.config?.outro_asset_id || "";
+        try {
+          await api(`/api/profiles/${encodeURIComponent(kid)}`, { method: "PATCH", body: JSON.stringify({ config: cfg }) });
+          toast(`Brand Kit «${existing.name}» обновлён`);
           await loadSettingsViewData();
           renderNavView(true);
         } catch (err) { toast(err.message, "err"); }

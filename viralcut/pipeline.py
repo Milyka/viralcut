@@ -690,6 +690,21 @@ def process_project(pid: str) -> None:
             found = _even_segments(duration, opts["target_dur"], opts["count"])
             db.merge_meta(pid, {"engine": "ffmpeg-even", "segments": len(found)})
         else:
+            # Параллельно запускаем best-effort скачивание повтора чата до старта Whisper
+            chat_box: Dict[str, Any] = {"path": None}
+            chat_thread: Optional[threading.Thread] = None
+            if project["url"].startswith(("https://", "http://")):
+                def _fetch_chat_bg() -> None:
+                    try:
+                        chat_box["path"] = downloader.fetch_chat_replay(
+                            project["url"], workdir, browser=opts.get("cookies_browser") or None,
+                        )
+                    except Exception:
+                        chat_box["path"] = None
+
+                chat_thread = threading.Thread(target=_fetch_chat_bg, name=f"chat-dl-{pid[:6]}", daemon=True)
+                chat_thread.start()
+
             progress(0.05, "Распознавание речи")
             transcript: Optional[Dict[str, Any]] = None
             if not transcribe.model_cached():
@@ -744,17 +759,14 @@ def process_project(pid: str) -> None:
             preset_hint = AI_PRESET_PROMPTS.get(str(opts.get("ai_preset") or "best"), "")
             full_instruction = " ".join(x for x in (preset_hint, opts.get("ai_prompt") or "") if x).strip()
 
-            # Best-effort загрузка/парсинг повтора чата (YouTube / Twitch VOD)
+            # Дожидаемся фоновой загрузки чата с коротким бюджетом и строим chat_curve.json
             chat_curve = None
             try:
                 from . import chat_replay
 
-                chat_path = None
-                if project["url"].startswith(("https://", "http://")):
-                    chat_path = downloader.fetch_chat_replay(
-                        project["url"], workdir, browser=opts.get("cookies_browser") or None,
-                    )
-                chat_curve = chat_replay.load_or_build(workdir, duration, chat_path=chat_path)
+                if chat_thread is not None and chat_thread.is_alive():
+                    chat_thread.join(timeout=4.0)
+                chat_curve = chat_replay.load_or_build(workdir, duration, chat_path=chat_box.get("path"))
                 if chat_curve:
                     db.merge_meta(pid, {
                         "chat_messages": int(chat_curve.get("total_messages") or 0),
@@ -1614,6 +1626,7 @@ def _is_temp_project_file(path: Path) -> bool:
         or name.startswith(("viralcut_", "krlzcut_")) and name.endswith(".zip")
         or name.startswith("probe_") and name.endswith(".wav")
         or name.startswith("recheck_") and name.endswith(".wav")
+        or name.endswith(".live_chat.json")
     )
 
 

@@ -2,6 +2,17 @@
 (function () {
   "use strict";
 
+  const ED_SVG = {
+    play: '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+    volOn: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>',
+    volOff: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>',
+    face: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="9" r="3.5"/><path d="M6 20a6 6 0 0 1 12 0"/></svg>',
+    center: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="4" width="12" height="16" rx="2"/><circle cx="12" cy="12" r="2"/></svg>',
+    blur: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/></svg>',
+    wand: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>',
+  };
+
   const SPLIT_RATIOS = ["50/50", "55/45", "60/40", "65/35", "70/30"];
   const ANIM_OPTIONS = [
     ["none", "Нет"],
@@ -230,10 +241,10 @@
             </div>
 
             <div class="mega-transport">
-              <button class="mega-play-btn" id="megaPlayBtn" type="button" aria-label="Воспроизвести / Пауза">▶</button>
-              <span class="mega-time" id="megaTime">00:00 / 00:00</span>
-              <input class="mega-scrubber" id="megaScrub" type="range" min="0" max="100" step="0.1" value="0" />
-              <button class="mini-chip" id="megaMuteBtn" type="button">🔊</button>
+              <button class="mega-play-btn" id="megaPlayBtn" type="button" aria-label="Воспроизвести / Пауза">${ED_SVG.play}</button>
+              <span class="mega-time" id="megaTime">00:00.0 / 00:00.0</span>
+              <input class="mega-scrubber" id="megaScrub" type="range" min="0" max="100" step="0.1" value="0" aria-label="Позиция воспроизведения" />
+              <button class="mini-chip" id="megaMuteBtn" type="button" aria-label="Звук">${ED_SVG.volOn}</button>
             </div>
 
             <div class="filmstrip-box" id="megaFilmstrip">
@@ -272,13 +283,13 @@
               </div>
               <div class="frame-cards">
                 <button class="frame-card ${ed.mode === "auto" ? "active" : ""}" data-ed-mode="auto" type="button">
-                  <span class="frame-glyph">👤</span><span>По лицу</span>
+                  <span class="frame-glyph">${ED_SVG.face}</span><span>По лицу</span>
                 </button>
                 <button class="frame-card ${ed.mode === "crop" ? "active" : ""}" data-ed-mode="crop" type="button">
-                  <span class="frame-glyph">⬜</span><span>По центру</span>
+                  <span class="frame-glyph">${ED_SVG.center}</span><span>По центру</span>
                 </button>
                 <button class="frame-card ${ed.mode === "blur" ? "active" : ""}" data-ed-mode="blur" type="button">
-                  <span class="frame-glyph">▦</span><span>Размытый фон</span>
+                  <span class="frame-glyph">${ED_SVG.blur}</span><span>Размытый фон</span>
                 </button>
               </div>
               <div id="megaAudioRow" style="display:none">
@@ -389,9 +400,9 @@
                 </div>
               </div>
 
-              <div style="padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.03);border:1px solid var(--separator);display:flex;flex-direction:column;gap:9px">
+              <div style="padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:9px">
                 <div style="display:flex;justify-content:space-between;align-items:center">
-                  <span style="font-size:12.5px;font-weight:640">Обводка текста</span>
+                  <span style="font-size:12.5px;font-weight:600">Обводка текста</span>
                   <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px"><input type="checkbox" id="edOutlineOn" ${ed.subOutline ? "checked" : ""} /> Вкл</label>
                 </div>
                 <label style="font-size:12px;color:var(--muted)">
@@ -420,9 +431,9 @@
             <section class="insp-card">
               <div class="insp-card-head">
                 <h4>Описание и хэштеги</h4>
-                <button class="mini-chip active" id="edGenCaptionBtn" type="button">✨ Сгенерировать</button>
+                <button class="mini-chip active" id="edGenCaptionBtn" type="button">${ED_SVG.wand}<span>Сгенерировать</span></button>
               </div>
-              <textarea id="edCaptionInput" rows="3" placeholder="Описание для Shorts, Reels или TikTok…" style="width:100%;padding:9px 11px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid var(--separator);font-size:12.5px;resize:vertical">${esc(ed.caption)}</textarea>
+              <textarea id="edCaptionInput" rows="3" placeholder="Описание для публикации клипа…" style="width:100%;padding:9px 11px;font-size:12.5px;resize:vertical">${esc(ed.caption)}</textarea>
             </section>
           </div>
         </div>
@@ -430,9 +441,9 @@
         <div class="mega-footer">
           <button class="btn-ghost" id="megaCancel" type="button">Отмена</button>
           <div class="mega-footer-right">
-            <button class="btn-ghost" id="megaApplyAll" type="button">Ко всем клипам</button>
+            <button class="btn-ghost" id="megaApplyAll" type="button">Применить ко всем</button>
             ${clip.status === "ready" ? `<a class="btn-ghost" href="${esc(videoSrc)}" download="${esc((clip.title || "clip") + ".mp4")}">Скачать MP4</a>` : ""}
-            <button class="btn-primary" id="megaSaveBtn" type="button">Сохранить и перерендерить</button>
+            <button class="btn-primary" id="megaSaveBtn" type="button">Перерендерить клип</button>
           </div>
         </div>
       </div>
@@ -676,8 +687,8 @@
       const dur = mainVid.duration || Math.max(0.5, ed.end - ed.start);
       timeEl.textContent = `${fmtSec(mainVid.currentTime || 0)} / ${fmtSec(dur)}`;
     });
-    mainVid.addEventListener("play", () => { playBtn.textContent = "❚❚"; });
-    mainVid.addEventListener("pause", () => { playBtn.textContent = "▶"; gameVid.pause(); });
+    mainVid.addEventListener("play", () => { playBtn.innerHTML = ED_SVG.pause; });
+    mainVid.addEventListener("pause", () => { playBtn.innerHTML = ED_SVG.play; gameVid.pause(); });
     mainVid.addEventListener("timeupdate", () => {
       const dur = mainVid.duration || Math.max(1, ed.end - ed.start);
       const pct = Math.max(0, Math.min(100, (mainVid.currentTime / dur) * 100));
@@ -697,7 +708,7 @@
     });
     $("#megaMuteBtn")?.addEventListener("click", (e) => {
       mainVid.muted = !mainVid.muted;
-      e.target.textContent = mainVid.muted ? "🔇" : "🔊";
+      e.currentTarget.innerHTML = mainVid.muted ? ED_SVG.volOff : ED_SVG.volOn;
     });
 
     // Inspector bindings
@@ -922,7 +933,7 @@
       } catch (err) { toast(err.message, "err"); }
       finally {
         btn.disabled = false;
-        btn.textContent = "✨ Сгенерировать";
+        btn.innerHTML = `${ED_SVG.wand}<span>Сгенерировать</span>`;
       }
     });
 

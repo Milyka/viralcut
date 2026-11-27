@@ -37,9 +37,9 @@ DEFAULTS: Dict[str, Any] = {
     "ai_model": "",             # пусто — модель провайдера по умолчанию
     "ai_key": "",               # ключ: на диск с правами 0600, в API не отдаём
     "agent_mode": False,        # агент: несколько шагов до результата
-    "theme": "apple",           # apple | cosmic | amber | emerald | ocean | custom
-    "palette_a": "#8b5cf6",     # первый цвет кастомного градиента
-    "palette_b": "#ec4899",     # второй цвет кастомного градиента
+    "theme": "obsidian",        # obsidian | amber | emerald | cobalt | crimson | custom
+    "palette_a": "#0ea5e9",     # первый цвет кастомной палитры
+    "palette_b": "#f59e0b",     # второй цвет кастомной палитры
     "whisper_model": "small",   # small | medium | large-v3-turbo
     "render_quality": "balanced",  # fast | balanced | high
 }
@@ -156,7 +156,7 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
             data["ai_key_scope"] = ai_key_scope(data)
         if "agent_mode" in patch:
             data["agent_mode"] = bool(patch["agent_mode"])
-        if "theme" in patch and patch["theme"] in ("apple", "cosmic", "amber", "emerald", "ocean", "custom"):
+        if "theme" in patch and patch["theme"] in ("obsidian", "amber", "emerald", "cobalt", "crimson", "custom"):
             data["theme"] = patch["theme"]
         for pkey in ("palette_a", "palette_b"):
             if pkey in patch:

@@ -3,21 +3,29 @@
   "use strict";
 
   const THEMES = [
-    { key: "apple", name: "Apple Pro Dark", sub: "Графит и стекло", a: "#6366f1", b: "#a855f7", bg: "#0d0e14" },
-    { key: "cosmic", name: "Cosmic Glass", sub: "Глубокий неон", a: "#8b5cf6", b: "#ec4899", bg: "#120c22" },
-    { key: "amber", name: "Classic Amber", sub: "Тёплый кинематограф", a: "#f59e0b", b: "#ea580c", bg: "#17110b" },
-    { key: "emerald", name: "Emerald Studio", sub: "Чистый изумруд", a: "#10b981", b: "#06b6d4", bg: "#0a1713" },
-    { key: "ocean", name: "Ocean Pro", sub: "Глубокий кобальт", a: "#0ea5e9", b: "#6366f1", bg: "#091323" },
-    { key: "custom", name: "Своя палитра", sub: "Любые 2 цвета", a: "#6366f1", b: "#ec4899", bg: "#11101c" },
+    { key: "obsidian", name: "KrlzCut Obsidian", sub: "Монохромная студия", a: "#FAFAFA", b: "#0EA5E9", bg: "#111113" },
+    { key: "amber", name: "Cinema Amber", sub: "Тёплый грейдинг", a: "#F59E0B", b: "#EA580C", bg: "#141210" },
+    { key: "emerald", name: "Studio Emerald", sub: "Контрольный монитор", a: "#10B981", b: "#06B6D4", bg: "#0E1412" },
+    { key: "cobalt", name: "Engineering Cobalt", sub: "Технический синий", a: "#3B82F6", b: "#0EA5E9", bg: "#0E1218" },
+    { key: "crimson", name: "Director Red", sub: "Индикатор записи", a: "#EF4444", b: "#F97316", bg: "#161010" },
+    { key: "custom", name: "Своя палитра", sub: "Любые два цвета", a: "#0EA5E9", b: "#F59E0B", bg: "#111113" },
   ];
 
   const PALETTE_SWATCHES = [
-    ["#6366f1", "#ec4899", "Неон"],
+    ["#0ea5e9", "#f59e0b", "Студия"],
     ["#0ea5e9", "#22d3ee", "Арктика"],
-    ["#f43f5e", "#fb923c", "Закат"],
-    ["#10b981", "#a3e635", "Лайм"],
-    ["#a855f7", "#3b82f6", "Кибер"],
+    ["#ef4444", "#f97316", "Закат"],
+    ["#10b981", "#84cc16", "Изумруд"],
+    ["#3b82f6", "#06b6d4", "Кобальт"],
   ];
+
+  const SVG = {
+    folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+    palette: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/></svg>',
+    mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/></svg>',
+    plus: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+    arrow: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+  };
 
   const AI_PRESETS = [
     { key: "best", label: "Лучшие", desc: "Самые сильные, цепляющие и досматриваемые моменты видео." },
@@ -30,6 +38,12 @@
     { key: "story", label: "История", desc: "Законченные мини-истории с завязкой, развитием и неожиданной развязкой." },
   ];
 
+  function normalizeThemeKey(key) {
+    if (key === "ocean") return "cobalt";
+    if (THEMES.some((t) => t.key === key)) return key;
+    return "obsidian";
+  }
+
   const ui = {
     sourceTab: "link",
     libFilter: "all",
@@ -37,9 +51,9 @@
     libView: "grid",
     selectedPid: null,
     selectedDetail: null,
-    theme: localStorage.getItem("krlzTheme") || "apple",
-    paletteA: localStorage.getItem("krlzPalA") || "#6366f1",
-    paletteB: localStorage.getItem("krlzPalB") || "#a855f7",
+    theme: normalizeThemeKey(localStorage.getItem("krlzTheme") || "obsidian"),
+    paletteA: localStorage.getItem("krlzPalA") || "#0ea5e9",
+    paletteB: localStorage.getItem("krlzPalB") || "#f59e0b",
     whisperPoll: null,
     saveThemeTimer: null,
     storage: null,
@@ -65,7 +79,7 @@
   }
 
   function applyTheme(theme, palA, palB, persist) {
-    const valid = THEMES.some((t) => t.key === theme) ? theme : "apple";
+    const valid = normalizeThemeKey(theme);
     ui.theme = valid;
     if (palA && /^#[0-9a-fA-F]{6}$/.test(palA)) ui.paletteA = palA;
     if (palB && /^#[0-9a-fA-F]{6}$/.test(palB)) ui.paletteB = palB;
@@ -98,7 +112,7 @@
     try {
       const conf = await api("/api/settings");
       state.settingsData = conf;
-      applyTheme(conf.theme || "apple", conf.palette_a || "#6366f1", conf.palette_b || "#a855f7", false);
+      applyTheme(conf.theme || "obsidian", conf.palette_a || "#0ea5e9", conf.palette_b || "#f59e0b", false);
     } catch (_) {}
   }
 
@@ -154,9 +168,9 @@
 
     // Live-update Dashboard circular rings without re-rendering DOM!
     if (!state.current && state.nav === "dashboard") {
-      updateRing("#ringCpu", "#ringCpuVal", cpu, "var(--theme-a)");
-      updateRing("#ringGpu", "#ringGpuVal", gpu.percent, "var(--theme-b)");
-      updateRing("#ringRam", "#ringRamVal", ram.percent, "#10b981");
+      updateRing("#ringCpu", "#ringCpuVal", cpu, "var(--signal)");
+      updateRing("#ringGpu", "#ringGpuVal", gpu.percent, "var(--signal-2)");
+      updateRing("#ringRam", "#ringRamVal", ram.percent, "var(--success)");
       const subGpu = $("#ringGpuSub");
       const subRam = $("#ringRamSub");
       const subCpu = $("#ringCpuSub");
@@ -189,34 +203,34 @@
     return `
       <section class="page-head">
         <div>
-          <h1>Добро пожаловать в KrlzCut</h1>
-          <p>Локальная AI-студия коротких клипов — быстрая нарезка, Слой игры и живые субтитры без облака.</p>
+          <h1>Студия монтажа KrlzCut</h1>
+          <p>Локальный рендер FFmpeg и распознавание речи Whisper на этом компьютере — видео остаётся на диске.</p>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <button class="btn-primary" id="dashNewBtn" type="button">+ Новый проект</button>
+          <button class="btn-primary" id="dashNewBtn" type="button" style="display:inline-flex;align-items:center;gap:7px">${SVG.plus}<span>Создать проект</span></button>
         </div>
       </section>
 
       <section class="dash-modes">
         <button class="mode-launch-card featured" data-launch-mode="ai" type="button">
-          <span class="mode-num"><span>01 · AI STUDIO</span><span class="mode-pill-tag">Рекомендуем</span></span>
-          <h3>ИИ-нарезка</h3>
-          <p>Распознавание речи Whisper + 8 вирусных пресетов, умное кадрирование по лицу и анимированные субтитры.</p>
-          <span class="mode-cta">Создать AI-клипы →</span>
+          <span class="mode-num"><span>01 · WHISPER + ИИ</span><span class="mode-pill-tag">Основной</span></span>
+          <h3>Нарезка по речи</h3>
+          <p>Транскрипция Whisper, 8 сценариев отбора фрагментов, автокадрирование по лицу и субтитры.</p>
+          <span class="mode-cta">Настроить проект ${SVG.arrow}</span>
         </button>
 
         <button class="mode-launch-card" data-launch-mode="stream" type="button">
-          <span class="mode-num"><span>02 · LIVE CAPTURE</span><span class="mode-pill-tag">Эфиры</span></span>
-          <h3>Нарезка стримов</h3>
-          <p>Подключение к YouTube / Twitch / Kick в реальном времени — лучшие моменты готовы ещё до конца эфира.</p>
-          <span class="mode-cta">Подключиться к эфиру →</span>
+          <span class="mode-num"><span>02 · ПРЯМОЙ ЭФИР</span><span class="mode-pill-tag">Поток</span></span>
+          <h3>Запись и нарезка стримов</h3>
+          <p>Захват прямых трансляций YouTube, Twitch и Kick с выделением фрагментов во время эфира.</p>
+          <span class="mode-cta">Подключить эфир ${SVG.arrow}</span>
         </button>
 
         <button class="mode-launch-card" data-launch-mode="even" type="button">
-          <span class="mode-num"><span>03 · FAST FFMPEG</span><span class="mode-pill-tag">Без Whisper</span></span>
-          <h3>Обычная нарезка</h3>
-          <p>Мгновенная равномерная нарезка на фрагменты через FFmpeg без транскрипции — идеально для нарезок и подкастов.</p>
-          <span class="mode-cta">Нарезать быстро →</span>
+          <span class="mode-num"><span>03 · FFMPEG</span><span class="mode-pill-tag">Без Whisper</span></span>
+          <h3>Равномерная нарезка</h3>
+          <p>Деление длинного видео на равные отрезки напрямую через FFmpeg без этапа транскрипции.</p>
+          <span class="mode-cta">Разделить видео ${SVG.arrow}</span>
         </button>
       </section>
 
@@ -225,7 +239,7 @@
           <div class="studio-card">
             <div class="card-title-row">
               <h2>Недавние проекты</h2>
-              <button class="btn-ghost" id="dashAllProjBtn" type="button" style="padding:6px 12px;font-size:12.5px">Все проекты (${state.projects.length})</button>
+              <button class="btn-ghost" id="dashAllProjBtn" type="button" style="height:32px;padding:0 12px;font-size:12.5px">Открыть все (${state.projects.length})</button>
             </div>
             ${recent.length ? `<div class="recent-list">
               ${recent.map((p) => {
@@ -244,17 +258,17 @@
                   <span class="status-pill ${st.cls}">${esc(st.text)}</span>
                 </div>`;
               }).join("")}
-            </div>` : `<div class="hint" style="padding:18px 4px">Проектов пока нет — выберите один из режимов выше или загрузите локальный файл.</div>`}
+            </div>` : `<div class="hint" style="padding:18px 4px">Проектов пока нет — выберите режим выше или откройте локальный видеофайл.</div>`}
 
             <div class="quick-tools">
               <button class="quick-tool-btn" id="dashLocalBtn" type="button">
-                <span>📁</span><span>Открыть локальное видео</span>
+                ${SVG.folder}<span>Открыть видеофайл</span>
               </button>
               <button class="quick-tool-btn" id="dashThemeBtn" type="button">
-                <span>🎨</span><span>Темы и 2-цветная палитра</span>
+                ${SVG.palette}<span>Настроить тему</span>
               </button>
               <button class="quick-tool-btn" id="dashWhisperBtn" type="button">
-                <span>🎙</span><span>Модели Whisper</span>
+                ${SVG.mic}<span>Выбрать модель Whisper</span>
               </button>
             </div>
           </div>
@@ -263,13 +277,13 @@
         <div style="display:flex;flex-direction:column;gap:16px">
           <div class="studio-card">
             <div class="card-title-row">
-              <h2>Система в реальном времени</h2>
+              <h2>Ресурсы системы</h2>
               <span class="status-pill done">Локально</span>
             </div>
             <div class="rings-row">
               <div class="ring-tile">
                 <div class="ring-wrap">
-                  <progress id="ringCpu" class="progress-ring" value="${cpu}" max="100" style="--value:${cpu};--ring-color:var(--theme-a)" aria-label="Загрузка процессора CPU">${cpu}%</progress>
+                  <progress id="ringCpu" class="progress-ring" value="${cpu}" max="100" style="--value:${cpu};--ring-color:var(--signal)" aria-label="Загрузка процессора CPU">${cpu}%</progress>
                   <span class="ring-center" aria-hidden="true"><b id="ringCpuVal">${cpu}%</b><small>CPU</small></span>
                 </div>
                 <span class="ring-sub" id="ringCpuSub">${sys.job?.stage ? "В работе" : "Простой"}</span>
@@ -277,7 +291,7 @@
 
               <div class="ring-tile">
                 <div class="ring-wrap">
-                  <progress id="ringGpu" class="progress-ring" value="${gpuPct}" max="100" style="--value:${gpuPct};--ring-color:var(--theme-b)" aria-label="Загрузка видеокарты GPU">${gpuPct}%</progress>
+                  <progress id="ringGpu" class="progress-ring" value="${gpuPct}" max="100" style="--value:${gpuPct};--ring-color:var(--signal-2)" aria-label="Загрузка видеокарты GPU">${gpuPct}%</progress>
                   <span class="ring-center" aria-hidden="true"><b id="ringGpuVal">${sys.gpu?.percent == null ? "н/д" : `${gpuPct}%`}</b><small>GPU</small></span>
                 </div>
                 <span class="ring-sub" id="ringGpuSub" title="${esc(gpuName)}">${esc(gpuName)}</span>
@@ -285,7 +299,7 @@
 
               <div class="ring-tile">
                 <div class="ring-wrap">
-                  <progress id="ringRam" class="progress-ring" value="${ramPct}" max="100" style="--value:${ramPct};--ring-color:#10b981" aria-label="Использование оперативной памяти RAM">${ramPct}%</progress>
+                  <progress id="ringRam" class="progress-ring" value="${ramPct}" max="100" style="--value:${ramPct};--ring-color:var(--success)" aria-label="Использование оперативной памяти RAM">${ramPct}%</progress>
                   <span class="ring-center" aria-hidden="true"><b id="ringRamVal">${ramPct}%</b><small>RAM</small></span>
                 </div>
                 <span class="ring-sub" id="ringRamSub">${esc(ramSub)}</span>
@@ -299,19 +313,19 @@
 
           <div class="studio-card">
             <div class="card-title-row">
-              <h2>Очередь</h2>
-              <button class="btn-ghost" id="dashQueueBtn" type="button" style="padding:5px 11px;font-size:12px">Открыть</button>
+              <h2>Очередь рендера</h2>
+              <button class="btn-ghost" id="dashQueueBtn" type="button" style="height:30px;padding:0 10px;font-size:12px">Перейти в очередь</button>
             </div>
             ${activeJobs.length ? activeJobs.slice(0, 3).map((p) => `
               <div style="margin-bottom:10px">
                 <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px">
                   <b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:75%">${esc(p.title || p.url)}</b>
-                  <span>${Math.round(p.progress || 0)}%</span>
+                  <span style="font-variant-numeric:tabular-nums">${Math.round(p.progress || 0)}%</span>
                 </div>
                 <div class="queue-bar"><i style="width:${Math.max(4, Math.round(p.progress || 0))}%"></i></div>
-                <div style="font-size:11.5px;color:var(--muted);margin-top:4px">${esc(p.stage || "Обработка…")}</div>
+                <div style="font-size:12px;color:var(--muted);margin-top:4px">${esc(p.stage || "Обработка…")}</div>
               </div>
-            `).join("") : `<div class="hint">Активных задач нет — студия свободна и готова к запуску.</div>`}
+            `).join("") : `<div class="hint">Активных задач рендера нет.</div>`}
           </div>
         </div>
       </section>
@@ -400,8 +414,8 @@
                 <small>Запись прямого эфира и автонарезка на лету</small>
               </button>
               <button class="mode-opt-card ${o.cutMode === "even" ? "active" : ""}" data-cut-mode="even" type="button">
-                <b>Обычная (FFmpeg)</b>
-                <small>Равномерные фрагменты без транскрипции — ультрабыстро</small>
+                <b>Равномерная (FFmpeg)</b>
+                <small>Деление на равные фрагменты напрямую через FFmpeg без Whisper</small>
               </button>
             </div>
           </div>
@@ -484,7 +498,7 @@
           <button class="btn-launch-big" id="newLaunchBtn" type="button">
             ${ui.sourceTab === "file" ? "Выбрать файл и запустить" : o.cutMode === "stream" ? "Подключиться к стриму" : o.cutMode === "even" ? "Нарезать через FFmpeg" : "Создать клипы"}
           </button>
-          <div class="hint" style="text-align:center">Всё рендерится локально. После нарезки любой клип можно докрутить в Мега-редакторе со Слоем игры.</div>
+          <div class="hint" style="text-align:center">Рендер выполняется локально на этом компьютере. После нарезки любой клип открывается в редакторе.</div>
         </aside>
       </div>
     `;
@@ -804,7 +818,7 @@
               <div class="recent-info">
                 <div class="recent-title">${esc(p.title || p.url)}</div>
                 <div class="recent-meta">
-                  <span>${Number(p.clips_count ?? 0)} клипов</span>
+                  <span>${Number(p.clips_count ?? 0)} ${plural(Number(p.clips_count ?? 0), "клип", "клипа", "клипов")}</span>
                   <span>${esc(p.error ? p.error.slice(0, 70) : (p.stage || "Завершено"))}</span>
                 </div>
               </div>

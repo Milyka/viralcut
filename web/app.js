@@ -1133,7 +1133,7 @@ function clipsGridHTML() {
       <div class="clip-media" data-action="edit"${thumb ? ` style="--clip-poster:url('${esc(thumb)}')"` : ""}>
         <video src="${preview}#t=0.1" ${thumb ? `poster="${thumb}"` : ""} muted loop playsinline preload="metadata"></video>
         <button type="button" class="play-hint" aria-label="Открыть клип">${ICONS.play}</button>
-        <div class="score-badge ${score >= 70 ? "hot" : ""}" title="Оценка момента по структуре речи, а не прогноз просмотров">⚡ ${score}</div>
+        <div class="score-badge ${score >= 70 ? "hot" : ""}" title="Оценка момента по структуре речи, а не прогноз просмотров">${score}</div>
         <div class="dur-badge">${fmtDur(dur)}</div>
       </div>
       <div class="clip-body">

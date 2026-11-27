@@ -30,10 +30,13 @@ _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _TG_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
 _STATE_LOCK = threading.Lock()
+_SHUTDOWN_EVENT = threading.Event()
 _TG_THREAD: Optional[threading.Thread] = None
 _TG_STOP: Optional[threading.Event] = None
+_TG_ACTIVE_HASH: str = ""
 _DC_THREAD: Optional[threading.Thread] = None
 _DC_STOP: Optional[threading.Event] = None
+_DC_ACTIVE_HASH: str = ""
 _TG_OFFSET: int = 0
 _TG_TOKEN_HASH: str = ""
 _SEEN_UPDATES: Set[int] = set()
@@ -41,6 +44,11 @@ _STATUS: Dict[str, Any] = {
     "telegram": {"running": False, "last_error": "", "bot_username": ""},
     "discord": {"running": False, "last_error": "", "bot_username": ""},
 }
+
+
+def _token_hash(token: str) -> str:
+    clean = str(token or "").strip()
+    return hashlib.sha256(clean.encode("utf-8")).hexdigest()[:16] if clean else ""
 
 
 def _safe_err(exc: Any, limit: int = 180) -> str:
@@ -204,8 +212,10 @@ def _watch_rerender_and_push(cid: str, prev_updated_at: float = 0.0,
                              *, poll_interval: float = 2.5, timeout: float = 240.0) -> bool:
     """Ждёт завершения перерендера после Regenerate Hook (только свежее updated_at > prev_updated_at)."""
     deadline = time.time() + max(0.2, float(timeout))
-    while time.time() < deadline:
-        time.sleep(max(0.01, float(poll_interval)))
+    interval = max(0.01, float(poll_interval))
+    while time.time() < deadline and not _SHUTDOWN_EVENT.is_set():
+        if _SHUTDOWN_EVENT.wait(interval):
+            return False
         clip = db.get_clip(cid)
         if not clip:
             return False
@@ -422,8 +432,10 @@ def _tg_poll_loop(stop_evt: threading.Event) -> None:
         token = str(conf.get("tg_token") or "").strip()
         if not conf.get("tg_enabled") or not token:
             break
-        tok_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+        tok_hash = _token_hash(token)
         with _STATE_LOCK:
+            if _TG_STOP is not stop_evt:
+                break
             _STATUS["telegram"]["running"] = True
             if tok_hash != _TG_TOKEN_HASH:
                 _TG_TOKEN_HASH = tok_hash
@@ -437,6 +449,8 @@ def _tg_poll_loop(stop_evt: threading.Event) -> None:
                 webhook_cleared = True
             except Exception:
                 pass
+        if stop_evt.is_set():
+            break
         try:
             params = urllib.parse.urlencode({
                 "timeout": 15,
@@ -444,11 +458,17 @@ def _tg_poll_loop(stop_evt: threading.Event) -> None:
                 "allowed_updates": json.dumps(["message", "callback_query"]),
             })
             data = _http_json(_tg_url(token, f"getUpdates?{params}"), timeout=22)
+            if stop_evt.is_set():
+                break
             backoff = 2.0
             with _STATE_LOCK:
+                if _TG_STOP is not stop_evt:
+                    break
                 _STATUS["telegram"]["last_error"] = ""
             if data.get("ok"):
                 for upd in data.get("result") or []:
+                    if stop_evt.is_set():
+                        break
                     uid = int(upd.get("update_id") or 0)
                     if uid >= _TG_OFFSET:
                         _TG_OFFSET = uid + 1
@@ -457,13 +477,17 @@ def _tg_poll_loop(stop_evt: threading.Event) -> None:
                     _SEEN_UPDATES.add(uid)
                     if len(_SEEN_UPDATES) > 2000:
                         _SEEN_UPDATES.clear()
+                    fresh_conf = app_settings.get()
                     try:
-                        process_telegram_update(upd, conf)
+                        process_telegram_update(upd, fresh_conf)
                     except Exception:
                         pass
         except Exception as exc:  # noqa: BLE001
+            if stop_evt.is_set():
+                break
             with _STATE_LOCK:
-                _STATUS["telegram"]["last_error"] = _safe_err(exc)
+                if _TG_STOP is stop_evt:
+                    _STATUS["telegram"]["last_error"] = _safe_err(exc)
             stop_evt.wait(backoff)
             backoff = min(30.0, backoff * 2.0)
     with _STATE_LOCK:
@@ -565,6 +589,14 @@ async def _dc_gateway_session(token: str, stop_evt: threading.Event) -> None:
     seq: Optional[int] = None
     ack_received = True
     zombie_closed = False
+    interaction_tasks: Set[asyncio.Task[Any]] = set()
+
+    async def _run_interaction(data: Dict[str, Any]) -> None:
+        conf = app_settings.get()
+        try:
+            await asyncio.to_thread(process_discord_interaction, data, conf)
+        except Exception:  # noqa: BLE001
+            pass
 
     async with websockets.connect(uri, max_size=4 * 1024 * 1024) as ws:
         hello_raw = await asyncio.wait_for(ws.recv(), timeout=15)
@@ -617,13 +649,16 @@ async def _dc_gateway_session(token: str, stop_evt: threading.Event) -> None:
                 elif op in (7, 9):  # RECONNECT / INVALID_SESSION
                     break
                 elif op == 0 and msg.get("t") == "INTERACTION_CREATE":
-                    conf = app_settings.get()
-                    try:
-                        await asyncio.to_thread(process_discord_interaction, msg.get("d") or {}, conf)
-                    except Exception:
-                        pass
+                    task = asyncio.create_task(_run_interaction(msg.get("d") or {}))
+                    interaction_tasks.add(task)
+                    task.add_done_callback(interaction_tasks.discard)
         finally:
             hb_task.cancel()
+            for task in list(interaction_tasks):
+                if not task.done():
+                    task.cancel()
+            if interaction_tasks:
+                await asyncio.gather(*interaction_tasks, return_exceptions=True)
 
 
 def _dc_gateway_loop(stop_evt: threading.Event) -> None:
@@ -634,13 +669,18 @@ def _dc_gateway_loop(stop_evt: threading.Event) -> None:
         if not conf.get("dc_enabled") or not token:
             break
         with _STATE_LOCK:
+            if _DC_STOP is not stop_evt:
+                break
             _STATUS["discord"]["running"] = True
         try:
             asyncio.run(_dc_gateway_session(token, stop_evt))
             backoff = 3.0
         except Exception as exc:  # noqa: BLE001
+            if stop_evt.is_set():
+                break
             with _STATE_LOCK:
-                _STATUS["discord"]["last_error"] = _safe_err(exc)
+                if _DC_STOP is stop_evt:
+                    _STATUS["discord"]["last_error"] = _safe_err(exc)
             stop_evt.wait(backoff)
             backoff = min(30.0, backoff * 2.0)
     with _STATE_LOCK:
@@ -729,31 +769,47 @@ def status() -> Dict[str, Any]:
 
 
 def start_bots() -> None:
-    global _TG_THREAD, _TG_STOP, _DC_THREAD, _DC_STOP
+    global _TG_THREAD, _TG_STOP, _TG_ACTIVE_HASH, _DC_THREAD, _DC_STOP, _DC_ACTIVE_HASH
     conf = app_settings.get()
+    _SHUTDOWN_EVENT.clear()
+    tg_tok = str(conf.get("tg_token") or "").strip()
+    tg_want = bool(conf.get("tg_enabled") and tg_tok)
+    tg_hash = _token_hash(tg_tok) if tg_want else ""
+
+    dc_tok = str(conf.get("dc_token") or "").strip()
+    dc_want = bool(conf.get("dc_enabled") and dc_tok)
+    dc_hash = _token_hash(dc_tok) if dc_want else ""
+
     with _STATE_LOCK:
-        if conf.get("tg_enabled") and str(conf.get("tg_token") or "").strip():
+        if tg_want:
             if _TG_THREAD is None or not _TG_THREAD.is_alive() or (_TG_STOP and _TG_STOP.is_set()):
                 stop_evt = threading.Event()
                 _TG_STOP = stop_evt
+                _TG_ACTIVE_HASH = tg_hash
                 _TG_THREAD = threading.Thread(
                     target=_tg_poll_loop, args=(stop_evt,), name="tg-approval-bot", daemon=True
                 )
                 _TG_THREAD.start()
-        if conf.get("dc_enabled") and str(conf.get("dc_token") or "").strip():
+        if dc_want:
             if _DC_THREAD is None or not _DC_THREAD.is_alive() or (_DC_STOP and _DC_STOP.is_set()):
                 stop_evt = threading.Event()
                 _DC_STOP = stop_evt
+                _DC_ACTIVE_HASH = dc_hash
                 _DC_THREAD = threading.Thread(
                     target=_dc_gateway_loop, args=(stop_evt,), name="dc-approval-bot", daemon=True
                 )
                 _DC_THREAD.start()
 
 
-def stop_bots() -> None:
+def stop_bots(*, shutdown: bool = True) -> None:
+    global _TG_ACTIVE_HASH, _DC_ACTIVE_HASH
+    if shutdown:
+        _SHUTDOWN_EVENT.set()
     with _STATE_LOCK:
         stops = [evt for evt in (_TG_STOP, _DC_STOP) if evt is not None]
         threads = [t for t in (_TG_THREAD, _DC_THREAD) if t is not None and t.is_alive()]
+        _TG_ACTIVE_HASH = ""
+        _DC_ACTIVE_HASH = ""
         _STATUS["telegram"]["running"] = False
         _STATUS["discord"]["running"] = False
     for evt in stops:
@@ -763,5 +819,43 @@ def stop_bots() -> None:
 
 
 def restart_bots() -> None:
-    stop_bots()
-    start_bots()
+    """Перезапускает только боты с изменившимся статусом или токеном, избегая HTTP 409."""
+    global _TG_ACTIVE_HASH, _DC_ACTIVE_HASH
+    conf = app_settings.get()
+    tg_tok = str(conf.get("tg_token") or "").strip()
+    tg_want = bool(conf.get("tg_enabled") and tg_tok)
+    tg_hash = _token_hash(tg_tok) if tg_want else ""
+
+    dc_tok = str(conf.get("dc_token") or "").strip()
+    dc_want = bool(conf.get("dc_enabled") and dc_tok)
+    dc_hash = _token_hash(dc_tok) if dc_want else ""
+
+    stops_to_set: List[threading.Event] = []
+    threads_to_join: List[threading.Thread] = []
+
+    with _STATE_LOCK:
+        tg_alive = bool(_TG_THREAD is not None and _TG_THREAD.is_alive() and _TG_STOP and not _TG_STOP.is_set())
+        tg_changed = (tg_want != tg_alive) or (tg_want and tg_hash != _TG_ACTIVE_HASH)
+        if tg_changed and _TG_STOP is not None:
+            stops_to_set.append(_TG_STOP)
+            if _TG_THREAD is not None and _TG_THREAD.is_alive():
+                threads_to_join.append(_TG_THREAD)
+            _TG_ACTIVE_HASH = ""
+            _STATUS["telegram"]["running"] = False
+
+        dc_alive = bool(_DC_THREAD is not None and _DC_THREAD.is_alive() and _DC_STOP and not _DC_STOP.is_set())
+        dc_changed = (dc_want != dc_alive) or (dc_want and dc_hash != _DC_ACTIVE_HASH)
+        if dc_changed and _DC_STOP is not None:
+            stops_to_set.append(_DC_STOP)
+            if _DC_THREAD is not None and _DC_THREAD.is_alive():
+                threads_to_join.append(_DC_THREAD)
+            _DC_ACTIVE_HASH = ""
+            _STATUS["discord"]["running"] = False
+
+    for evt in stops_to_set:
+        evt.set()
+    for t in threads_to_join:
+        t.join(timeout=2.0)
+
+    if tg_want or dc_want:
+        start_bots()

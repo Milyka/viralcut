@@ -125,7 +125,7 @@ WHISPER_CATALOG: List[Dict[str, Any]] = [
 ]
 _MODEL_DOWNLOADS: Dict[str, Dict[str, Any]] = {}
 _DL_LOCK = threading.Lock()
-_ACTIVE_TRANSCRIBES = 0
+_ACTIVE_BY_MODEL: Dict[str, int] = {}
 _ACTIVE_MODEL_KEY: Optional[str] = None
 
 
@@ -244,7 +244,7 @@ def delete_model(key: str) -> Dict[str, Any]:
         if (_MODEL_DOWNLOADS.get(key) or {}).get("downloading"):
             raise RuntimeError("Модель сейчас скачивается — дождитесь окончания загрузки")
     with _MODEL_LOCK:
-        if _ACTIVE_TRANSCRIBES > 0 and (_ACTIVE_MODEL_KEY == key or active_model_key() == key):
+        if _ACTIVE_BY_MODEL.get(key, 0) > 0:
             raise RuntimeError("Модель сейчас используется в активной задаче распознавания")
         cache_dir = _hf_cache_dir(spec["repo"])
         if active_model_key() == key:
@@ -723,7 +723,6 @@ def _split_audio(wav: Path, workdir: Path, chunk_seconds: int) -> tuple[List[tup
 def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                on_progress: ProgressCb = None, *, audio_track: Optional[int] = None,
                window: Optional[tuple[float, float]] = None) -> Dict[str, Any]:
-    global _ACTIVE_TRANSCRIBES
     started = time.time()
     used_model = active_model_key()
     if on_progress:
@@ -743,7 +742,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                                   audio_track=audio_track, window=window)
     chunks_folder: Optional[Path] = None
     with _MODEL_LOCK:
-        _ACTIVE_TRANSCRIBES += 1
+        _ACTIVE_BY_MODEL[used_model] = _ACTIVE_BY_MODEL.get(used_model, 0) + 1
     try:
         chunk_seconds = max(120, int(os.environ.get("VIRALCUT_WHISPER_CHUNK", "600")))
         trigger = max(chunk_seconds, int(os.environ.get("VIRALCUT_WHISPER_CHUNK_MIN", "1800")))
@@ -861,7 +860,11 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
         }
     finally:
         with _MODEL_LOCK:
-            _ACTIVE_TRANSCRIBES = max(0, _ACTIVE_TRANSCRIBES - 1)
+            rem = _ACTIVE_BY_MODEL.get(used_model, 1) - 1
+            if rem > 0:
+                _ACTIVE_BY_MODEL[used_model] = rem
+            else:
+                _ACTIVE_BY_MODEL.pop(used_model, None)
         if chunks_folder is not None:
             shutil.rmtree(chunks_folder, ignore_errors=True)
         try:

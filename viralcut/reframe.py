@@ -249,6 +249,8 @@ def _simplify_path(times: List[float], xs: List[float], ys: List[float],
 
 def _coarse_path(path: Dict[str, Any], max_points: int = 18) -> Dict[str, Any]:
     """Аварийный вариант пути: редкие точки. Нужен, если ffmpeg всё же отказался."""
+    if path.get("layout") == "dual_split":
+        return path
     times = path["times"]
     if len(times) <= max_points:
         return path
@@ -260,8 +262,75 @@ def _coarse_path(path: Dict[str, Any], max_points: int = 18) -> Dict[str, Any]:
             "x": [path["x"][i] for i in idx], "y": [path["y"][i] for i in idx]}
 
 
+def _detect_dual_split(samples: List[Tuple[float, List[Dict[str, float]], List[Any]]],
+                       src_w: int, src_h: int, aw: int, ah: int) -> Optional[Dict[str, Any]]:
+    """Распознаёт 2-спикерную геометрию (подкаст/интервью) для 50/50 стека."""
+    if not samples or src_w <= src_h or ah <= aw:
+        return None
+    left_faces: List[Dict[str, float]] = []
+    right_faces: List[Dict[str, float]] = []
+    dual_frames = 0
+    for _, faces, _ in samples:
+        if len(faces) < 2:
+            continue
+        confident = [f for f in faces if float(f.get("score", 1.0)) >= 0.5]
+        if len(confident) < 2:
+            continue
+        left_cands = [f for f in confident if float(f["cx"]) < 0.48 * src_w]
+        right_cands = [f for f in confident if float(f["cx"]) > 0.52 * src_w]
+        if not left_cands or not right_cands:
+            continue
+        left_best = max(left_cands, key=lambda f: f["w"] * f["h"])
+        right_best = max(right_cands, key=lambda f: f["w"] * f["h"])
+        if (float(right_best["cx"]) - float(left_best["cx"])) < 0.22 * src_w:
+            continue
+        dual_frames += 1
+        left_faces.append(left_best)
+        right_faces.append(right_best)
+
+    coverage = dual_frames / max(1, len(samples))
+    if coverage < 0.60 or not left_faces or not right_faces:
+        return None
+
+    def _med(vals: List[float]) -> float:
+        s = sorted(vals)
+        return s[len(s) // 2]
+
+    # Целевое соотношение сторон одной половины вертикального кадра (w x h/2)
+    pane_ar = (aw / (ah / 2.0)) if ah > 0 else 1.125
+
+    def _speaker_box(group: List[Dict[str, float]]) -> Dict[str, int]:
+        cx = _med([float(f["cx"]) for f in group])
+        cy = _med([float(f["cy"]) for f in group])
+        fh = _med([float(f["h"]) for f in group])
+        # Берём стабильную высоту окна так, чтобы влезли голова и плечи, без наезда на второго спикера
+        max_half_w = max(64, int(round(src_w * 0.56)))
+        desired_h = min(src_h, max(int(round(fh * 3.4)), int(round(src_h * 0.78))))
+        box_h = min(src_h, desired_h)
+        box_w = int(round(box_h * pane_ar))
+        if box_w > max_half_w:
+            box_w = max_half_w
+            box_h = min(src_h, int(round(box_w / pane_ar)))
+        box_w = max(64, min(src_w, box_w - (box_w % 2)))
+        box_h = max(64, min(src_h, box_h - (box_h % 2)))
+        x = int(round(max(0.0, min(src_w - box_w, cx - box_w * 0.5))))
+        y = int(round(max(0.0, min(src_h - box_h, cy - box_h * 0.40))))
+        return {"x": x, "y": y, "w": box_w, "h": box_h}
+
+    return {
+        "layout": "dual_split",
+        "top": _speaker_box(left_faces),
+        "bottom": _speaker_box(right_faces),
+        "source": [src_w, src_h],
+        "coverage": round(coverage, 3),
+        "faces": dual_frames,
+        "samples": len(samples),
+    }
+
+
 def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16",
-                    sample_fps: float = 3.0, max_width: int = 960) -> Optional[Dict[str, Any]]:
+                    sample_fps: float = 3.0, max_width: int = 960,
+                    allow_dual_split: bool = True) -> Optional[Dict[str, Any]]:
     """Анализирует фрагмент и возвращает keyframes окна кадрирования.
 
     Результат: {"x": [...], "y": [...], "times": [...], "crop_w": int, "crop_h": int}
@@ -325,6 +394,11 @@ def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16"
 
         if not samples:
             return None
+
+        if allow_dual_split and aspect in ("9:16", "4:5") and src_w > src_h:
+            dual = _detect_dual_split(samples, src_w, src_h, aw, ah)
+            if dual is not None:
+                return dual
 
         dt = max(0.05, duration / max(1, len(samples) - 1))
         xs: List[Optional[float]] = []
@@ -473,7 +547,7 @@ def remap_crop_path(path: Optional[Dict[str, Any]], segments: List[Dict[str, flo
     выбрасываются, остальные сдвигаются на новое место. Без этого окно
     кадрирования «опаздывало» бы ровно на длину вырезанных пауз.
     """
-    if not path or not segments:
+    if not path or not segments or path.get("layout") == "dual_split":
         return path
     times = [float(t) for t in path.get("times") or []]
     xs = list(path.get("x") or [])

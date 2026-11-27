@@ -68,7 +68,13 @@ hiddenimports = [
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
     "anyio._backends._asyncio",
+    "websockets",
+    "websockets.asyncio.client",
     "viralcut.diagnostics",  # разбор app.log импортируется из эндпоинта лениво
+    "viralcut.profiles",
+    "viralcut.bgm",
+    "viralcut.chat_replay",
+    "viralcut.bot_notify",
 ] + collect_submodules("yt_dlp_plugins") + collect_submodules("fontTools")
 
 if IS_MAC:

@@ -267,12 +267,12 @@ class DesktopApi:
         project = db.get_project(project_id)
         if not project:
             return {"ok": False, "error": "Проект не найден"}
-        archive = PROJECTS_DIR / project_id / f"viralcut_{project_id}.zip"
+        archive = PROJECTS_DIR / project_id / f"krlzcut_{project_id}.zip"
         try:
             pipeline.export_zip(project_id, archive)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)[:300]}
-        name = f"viralcut_{self._safe(project.get('title') or 'clips')}.zip"
+        name = f"krlzcut_{self._safe(project.get('title') or 'clips')}.zip"
         from viralcut import settings as app_settings
 
         conf = app_settings.get()
@@ -806,8 +806,9 @@ def main() -> None:
     def shutdown(*_args: Any) -> None:
         nonlocal pot_proc
         try:
-            from viralcut import cpu_limit, live
+            from viralcut import bot_notify, cpu_limit, live
 
+            bot_notify.stop_bots()
             for pid in list(getattr(live, "_STOP_EVENTS", {}).keys()):
                 live.stop_stream(pid)
             cpu_limit.stop()

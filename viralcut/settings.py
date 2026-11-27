@@ -42,6 +42,15 @@ DEFAULTS: Dict[str, Any] = {
     "palette_b": "#f59e0b",     # второй цвет кастомной палитры
     "whisper_model": "small",   # small | medium | large-v3-turbo
     "render_quality": "balanced",  # fast | balanced | high
+    "default_profile_id": "",
+    "tg_enabled": False,
+    "tg_token": "",
+    "tg_allowed_users": "",
+    "tg_chat_id": "",
+    "dc_enabled": False,
+    "dc_token": "",
+    "dc_channel_id": "",
+    "dc_allowed_users": "",
 }
 _LOCK = threading.Lock()
 
@@ -65,6 +74,10 @@ def _save(data: Dict[str, Any]) -> None:
             json.dump(data, pending, ensure_ascii=False, indent=2)
             pending.close()
             os.replace(path, SETTINGS_FILE)
+            try:
+                os.chmod(SETTINGS_FILE, 0o600)
+            except OSError:
+                pass
         finally:
             path.unlink(missing_ok=True)
 
@@ -86,6 +99,10 @@ def public(data: Dict[str, Any]) -> Dict[str, Any]:
     has_key = bool(str(safe.get("ai_key") or "").strip()) and scope == ai_key_scope(data)
     safe["ai_key"] = ""
     safe["ai_key_set"] = has_key
+    safe["tg_token_set"] = bool(str(safe.get("tg_token") or "").strip())
+    safe["tg_token"] = ""
+    safe["dc_token_set"] = bool(str(safe.get("dc_token") or "").strip())
+    safe["dc_token"] = ""
     return safe
 
 
@@ -174,5 +191,27 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
             data["whisper_model"] = patch["whisper_model"]
         if "render_quality" in patch and patch["render_quality"] in ("fast", "balanced", "high"):
             data["render_quality"] = patch["render_quality"]
+        if "default_profile_id" in patch:
+            data["default_profile_id"] = str(patch["default_profile_id"] or "").strip()[:64]
+        if "tg_enabled" in patch:
+            data["tg_enabled"] = bool(patch["tg_enabled"])
+        if patch.get("clear_tg_token"):
+            data["tg_token"] = ""
+        elif str(patch.get("tg_token") or "").strip():
+            data["tg_token"] = str(patch["tg_token"]).strip()[:256]
+        if "tg_allowed_users" in patch:
+            data["tg_allowed_users"] = str(patch["tg_allowed_users"] or "").strip()[:1000]
+        if "tg_chat_id" in patch:
+            data["tg_chat_id"] = str(patch["tg_chat_id"] or "").strip()[:64]
+        if "dc_enabled" in patch:
+            data["dc_enabled"] = bool(patch["dc_enabled"])
+        if patch.get("clear_dc_token"):
+            data["dc_token"] = ""
+        elif str(patch.get("dc_token") or "").strip():
+            data["dc_token"] = str(patch["dc_token"]).strip()[:256]
+        if "dc_channel_id" in patch:
+            data["dc_channel_id"] = str(patch["dc_channel_id"] or "").strip()[:64]
+        if "dc_allowed_users" in patch:
+            data["dc_allowed_users"] = str(patch["dc_allowed_users"] or "").strip()[:1000]
         _save(data)
     return get()

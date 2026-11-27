@@ -421,13 +421,17 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 pip: Optional[Dict[str, Any]] = None,
                 audio_track: int = 0,
                 spans: Optional[List[Dict[str, float]]] = None,
-                game_layer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                game_layer: Optional[Dict[str, Any]] = None,
+                watermark: Optional[Dict[str, Any]] = None,
+                intro_asset_id: Optional[str] = None,
+                outro_asset_id: Optional[str] = None,
+                bgm: Optional[Dict[str, Any]] = None,
+                punch_in_zoom: bool = False) -> Dict[str, Any]:
     """Рендерит вертикальный/горизонтальный клип из окна исходника.
 
-    spans — план склейки без пауз (analyze.cut_plan): отрезки исходника в
-    абсолютных секундах. Если он задан, видео и звук режутся trim/atrim, затем
-    склеиваются concat — паузы просто исчезают из клипа, а не ускоряются.
-    game_layer — опциональный нижний слой (Split-Screen: Minecraft/satisfying).
+    Поддерживает: вырезание пауз (spans), 2-speaker dual_split, Split-Screen (game_layer),
+    хук punch-in зум, водяной знак (watermark), BGM с sidechain авто-приглушением и
+    видео-бамперы интро/аутро.
     """
     w, h = ASPECTS.get(aspect, ASPECTS["9:16"])
     segments = _cut_spans(spans, clip_start, clip_end)
@@ -457,13 +461,49 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         preset = "veryfast"
 
     # Слой игры (Split-Screen)
-    from . import game_layer as _gl
+    from . import bgm as _bgm, game_layer as _gl, profiles as _profiles
 
     game_cfg = _gl.normalize_config(game_layer)
     game_path: Optional[Path] = _gl.resolve_path(game_cfg["clip_id"]) if game_cfg else None
     if not game_path:
         game_cfg = None
     top_h, bot_h = _gl.split_heights(h, game_cfg["split"]) if game_cfg else (h, 0)
+
+    # Водяной знак (Brand Kit)
+    wm_cfg = _profiles.normalize_watermark(watermark)
+    wm_path: Optional[Path] = _profiles.resolve_asset(wm_cfg["asset_id"], "watermark") if wm_cfg else None
+    if not wm_path:
+        wm_cfg = None
+
+    # Фоновая музыка (BGM auto-ducking)
+    bgm_cfg = _bgm.normalize_config(bgm)
+    bgm_path: Optional[Path] = _bgm.resolve_path(bgm_cfg["track_id"]) if bgm_cfg else None
+    if not bgm_path:
+        bgm_cfg = None
+
+    # Интро / аутро бамперы
+    intro_path: Optional[Path] = _profiles.resolve_asset(intro_asset_id, "intro") if intro_asset_id else None
+    outro_path: Optional[Path] = _profiles.resolve_asset(outro_asset_id, "outro") if outro_asset_id else None
+    intro_info: Dict[str, Any] = {}
+    outro_info: Dict[str, Any] = {}
+    if intro_path:
+        try:
+            intro_info = probe(intro_path)
+            if not intro_info.get("has_video") or float(intro_info.get("duration") or 0) <= 0.1:
+                intro_path = None
+        except Exception:
+            intro_path = None
+    if outro_path:
+        try:
+            outro_info = probe(outro_path)
+            if not outro_info.get("has_video") or float(outro_info.get("duration") or 0) <= 0.1:
+                outro_path = None
+        except Exception:
+            outro_path = None
+    has_bumpers = bool(intro_path or outro_path)
+    total_duration = duration + (float(intro_info.get("duration") or 0.0) if intro_path else 0.0) + (
+        float(outro_info.get("duration") or 0.0) if outro_path else 0.0
+    )
 
     sharpen_base = info["width"] < w * 0.75
     audio_only = not info.get("has_video", bool(info["width"] and info["height"]))
@@ -485,6 +525,27 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
         pip_mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
 
+    # Предвычисляем индексы входов FFmpeg (совпадают между _build_filters и _compose)
+    next_idx = 1
+    pip_idx = next_idx if pip_mask is not None else -1
+    if pip_mask is not None:
+        next_idx += 1
+    game_idx = next_idx if (game_cfg and game_path is not None) else -1
+    if game_idx >= 0:
+        next_idx += 1
+    wm_idx = next_idx if (wm_cfg and wm_path is not None) else -1
+    if wm_idx >= 0:
+        next_idx += 1
+    bgm_idx = next_idx if (bgm_cfg and bgm_path is not None) else -1
+    if bgm_idx >= 0:
+        next_idx += 1
+    intro_idx = next_idx if intro_path is not None else -1
+    if intro_idx >= 0:
+        next_idx += 1
+    outro_idx = next_idx if outro_path is not None else -1
+    if outro_idx >= 0:
+        next_idx += 1
+
     def _zoom_pan_crop(in_lbl: str, out_lbl: str, tw: int, th: int,
                        zoom: float, pan: List[float], sharp_flag: bool = False) -> str:
         z = max(1.0, min(2.5, float(zoom or 1.0)))
@@ -502,6 +563,11 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
     def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
         target_h = top_h if game_cfg else h
+        is_dual_split = bool(
+            not audio_only and mode == "auto" and not game_cfg
+            and isinstance(path_used, dict) and path_used.get("layout") == "dual_split"
+            and path_used.get("top") and path_used.get("bottom")
+        )
         if audio_only:
             parts = [f"color=c=#0f0e16:s={w}x{target_h}:r=30:d={duration:.3f}[base]"]
             prefix = ""
@@ -509,16 +575,41 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             sharp = sharpen_base
             src = "[vsrc]" if segments else "[0:v]"
             prefix = _video_spans_graph(segments, base) + ";" if segments else ""
-            if game_cfg and (game_cfg["top_zoom"] > 1.01 or game_cfg["top_pan"] != [0.0, 0.0]):
+            if is_dual_split:
+                half_h = h // 2
+                half_h -= half_h % 2
+                bot_half_h = h - half_h
+                tbox = path_used["top"]
+                bbox = path_used["bottom"]
+                parts = [
+                    f"{src}split=2[_ds_in1][_ds_in2]",
+                    (
+                        f"[_ds_in1]crop={int(tbox['w'])}:{int(tbox['h'])}:{int(tbox['x'])}:{int(tbox['y'])},"
+                        f"scale={w}:{half_h}:force_original_aspect_ratio=increase,"
+                        f"crop={w}:{half_h},fps=30,setsar=1,setpts=PTS-STARTPTS[_topn]"
+                    ),
+                    (
+                        f"[_ds_in2]crop={int(bbox['w'])}:{int(bbox['h'])}:{int(bbox['x'])}:{int(bbox['y'])},"
+                        f"scale={w}:{bot_half_h}:force_original_aspect_ratio=increase,"
+                        f"crop={w}:{bot_half_h},fps=30,setsar=1,setpts=PTS-STARTPTS[_botn]"
+                    ),
+                    "[_topn][_botn]vstack=inputs=2[base]",
+                ]
+            elif game_cfg and (game_cfg["top_zoom"] > 1.01 or game_cfg["top_pan"] != [0.0, 0.0]):
                 parts = [_zoom_pan_crop(src, "[base]", w, target_h,
                                         game_cfg["top_zoom"], game_cfg["top_pan"], sharp)]
             elif game_cfg and mode != "blur":
                 # В Split-Screen заполняем верхний слой без размытых полос, сохраняя фокус по лицу.
                 fx = focus_x
-                if path_used and path_used.get("crop_w") and info["width"]:
-                    pts = path_used.get("points") or []
-                    if pts:
-                        avg_x = sum(float(p[1]) for p in pts) / len(pts)
+                if (
+                    isinstance(path_used, dict)
+                    and path_used.get("layout") != "dual_split"
+                    and path_used.get("crop_w")
+                    and info["width"]
+                ):
+                    xs = path_used.get("x") or []
+                    if xs:
+                        avg_x = sum(float(v) for v in xs) / len(xs)
                         fx = max(0.0, min(1.0, (avg_x + float(path_used["crop_w"]) * 0.5) / info["width"]))
                 parts = [_crop_chain(w, target_h, fx, sharpen=sharp, src=src)]
             elif mode == "auto" and path_used and not game_cfg:
@@ -528,7 +619,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 parts = [_bg_chain(w, target_h, focus_x, sharp, src)]
             else:
                 parts = [_crop_chain(w, target_h, focus_x, sharpen=sharp, src=src)]
-            if pip_mask is not None and parts[0].rstrip().endswith("[base]"):
+            if pip_mask is not None and not is_dual_split and parts[0].rstrip().endswith("[base]"):
                 from . import pip as _pip
 
                 pos = (pip or {}).get("pos") or [0.72, 0.78]
@@ -537,8 +628,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 main_step = parts[0].rstrip()[:-len("[base]")] + "[_basem]"
                 parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step, src)]
 
-        if game_cfg and game_path is not None:
-            game_idx = 2 if pip_mask is not None else 1
+        if game_cfg and game_path is not None and game_idx >= 0:
             parts[0] = parts[0].rstrip()[:-len("[base]")] + "[_topv]"
             parts.append(
                 _zoom_pan_crop(f"[{game_idx}:v]", "[_botv]", w, bot_h,
@@ -550,15 +640,48 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 "[_topn][_botn]vstack=inputs=2[base]"
             )
 
+        cur_v = "[base]"
+
+        # Плавный хук punch-in zoom (1.0 -> 1.08 за первые 3 сек) до субтитров
+        if punch_in_zoom and not audio_only and not game_cfg and not is_dual_split:
+            parts.append(
+                f"{cur_v}fps=30,zoompan="
+                f"z='if(lte(on,90),1+0.08*(on/90),max(1,1.08-0.08*((on-90)/45)))':"
+                f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps=30,setsar=1[_pz]"
+            )
+            cur_v = "[_pz]"
+
+        # Водяной знак (Brand Kit)
+        if wm_cfg and wm_idx >= 0:
+            wm_w = max(16, int(round(w * float(wm_cfg["scale"]))))
+            wm_w -= wm_w % 2
+            alpha = float(wm_cfg["opacity"])
+            m = int(wm_cfg["margin"])
+            pos_map = {
+                "top-left": f"{m}:{m}",
+                "top-right": f"W-w-{m}:{m}",
+                "bottom-left": f"{m}:H-h-{m}",
+                "bottom-right": f"W-w-{m}:H-h-{m}",
+            }
+            xy = pos_map.get(wm_cfg["position"], f"W-w-{m}:{m}")
+            parts.append(
+                f"[{wm_idx}:v]scale={wm_w}:-2,format=rgba,colorchannelmixer=aa={alpha:.2f}[_wm];"
+                f"{cur_v}[_wm]overlay={xy}:format=auto[_wmed]"
+            )
+            cur_v = "[_wmed]"
+
+        main_out_lbl = "[vmain]" if has_bumpers else "[v]"
         if ass_path is not None:
             fonts_dir = custom_fonts.libass_dir()
             _log_fonts_dir(fonts_dir)
+            extra = ",fps=30,setsar=1,setpts=PTS-STARTPTS" if has_bumpers else ""
             parts.append(
-                f"[base]ass=filename='{_esc(ass_path)}':fontsdir='{_esc(fonts_dir)}':alpha=1,"
-                f"format=yuv420p[v]"
+                f"{cur_v}ass=filename='{_esc(ass_path)}':fontsdir='{_esc(fonts_dir)}':alpha=1"
+                f"{extra},format=yuv420p{main_out_lbl}"
             )
         else:
-            parts.append("[base]scale=in_range=auto:out_range=tv,format=yuv420p[v]")
+            extra = ",fps=30,setsar=1,setpts=PTS-STARTPTS" if has_bumpers else ""
+            parts.append(f"{cur_v}scale=in_range=auto:out_range=tv{extra},format=yuv420p{main_out_lbl}")
         return prefix + ";".join(parts)
 
     vlabel = "[v]"
@@ -579,6 +702,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             text = "loudnorm=I=-14:TP=-1.5:LRA=11"
         fade_out = max(0.0, duration - 0.06)
         return text + f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
+
+    _AFMT = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
     def _compose(video_args: List[str], filters: str, output: Path) -> List[str]:
         """Собирает команду целиком: так откат на другой энкодер — это пересборка."""
@@ -608,38 +733,131 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                       "-t", f"{duration + 1.0:.3f}", "-i", str(game_path)]
             if game_cfg.get("audio"):
                 game_has_audio = bool(g_info.get("has_audio"))
+        if wm_cfg and wm_path is not None:
+            built += ["-i", str(wm_path)]
+        if bgm_cfg and bgm_path is not None:
+            built += ["-stream_loop", "-1", "-t", f"{duration + 1.0:.3f}", "-i", str(bgm_path)]
+        if intro_path is not None:
+            built += ["-i", str(intro_path)]
+        if outro_path is not None:
+            built += ["-i", str(outro_path)]
+
         graph = filters
+        has_bgm = bool(bgm_cfg and bgm_idx >= 0)
+        needs_audio_graph = bool(segments or game_has_audio or has_bgm or has_bumpers)
         audio_map = f"0:a:{max(0, int(audio_track))}?"
         use_graph_audio = False
-        if info["has_audio"] and segments:
-            # звук склеиваем в том же filter_complex, что и видео: паузы выпадают
-            graph = (graph + ";" + _audio_spans_graph(segments, base, audio_track) + ";"
-                     + f"[aconc]{_audio_filter()}[amain]")
-            audio_map = "[amain]"
+        has_any_audio = bool(info["has_audio"] or game_has_audio or has_bgm or has_bumpers)
+
+        if needs_audio_graph and has_any_audio:
             use_graph_audio = True
-        elif info["has_audio"] and game_has_audio:
-            graph = graph + f";[0:a:{max(0, int(audio_track))}]{_audio_filter()}[amain]"
-            audio_map = "[amain]"
-            use_graph_audio = True
-        if game_has_audio and game_cfg:
-            game_idx = 2 if pip_mask is not None else 1
             if info["has_audio"]:
-                graph += f";[{game_idx}:a]volume=0.22[agame];[amain][agame]amix=inputs=2:duration=first:dropout_transition=2[aout]"
-                audio_map = "[aout]"
+                if segments:
+                    graph += f";{_audio_spans_graph(segments, base, audio_track)};[aconc]{_audio_filter()},{_AFMT}[amain]"
+                else:
+                    graph += f";[0:a:{max(0, int(audio_track))}]{_audio_filter()},{_AFMT}[amain]"
+            if game_has_audio and game_idx >= 0:
+                g_vol = "0.22" if info["has_audio"] else "0.5"
+                graph += f";[{game_idx}:a]{_AFMT},volume={g_vol}[agame]"
+
+            if has_bgm:
+                vol_db = float(bgm_cfg["volume_db"])
+                bgm_fo = max(0.0, duration - 1.0)
+                graph += (
+                    f";[{bgm_idx}:a]atrim=0:{duration:.3f},asetpts=PTS-STARTPTS,{_AFMT},"
+                    f"volume={vol_db:.1f}dB,afade=t=in:st=0:d=0.6,afade=t=out:st={bgm_fo:.3f}:d=1.0[bgm_pre]"
+                )
+                if info["has_audio"] and bgm_cfg.get("ducking", True):
+                    drop = max(4.0, abs(float(bgm_cfg.get("duck_db", -22.0)) - vol_db))
+                    ratio = max(4, min(14, int(round(drop))))
+                    graph += (
+                        f";[amain]asplit=2[voice][voicemix];"
+                        f"[bgm_pre][voice]sidechaincompress=threshold=0.04:ratio={ratio}:attack=15:release=350:makeup=1[bgm_ducked]"
+                    )
+                    mix_inputs = ["[voicemix]", "[bgm_ducked]"]
+                    if game_has_audio:
+                        mix_inputs.append("[agame]")
+                    graph += (
+                        f";{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:"
+                        f"dropout_transition=2:normalize=0,alimiter=limit=0.95[amain_mix]"
+                    )
+                    audio_map = "[amain_mix]"
+                elif info["has_audio"]:
+                    mix_inputs = ["[amain]", "[bgm_pre]"]
+                    if game_has_audio:
+                        mix_inputs.append("[agame]")
+                    graph += (
+                        f";{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:"
+                        f"dropout_transition=2:normalize=0,alimiter=limit=0.95[amain_mix]"
+                    )
+                    audio_map = "[amain_mix]"
+                else:
+                    if game_has_audio:
+                        graph += (
+                            ";[bgm_pre][agame]amix=inputs=2:duration=first:"
+                            "dropout_transition=2:normalize=0,alimiter=limit=0.95[amain_mix]"
+                        )
+                        audio_map = "[amain_mix]"
+                    else:
+                        audio_map = "[bgm_pre]"
+            elif info["has_audio"] and game_has_audio:
+                graph += ";[amain][agame]amix=inputs=2:duration=first:dropout_transition=2[amain_mix]"
+                audio_map = "[amain_mix]"
+            elif info["has_audio"]:
+                audio_map = "[amain]"
+            elif game_has_audio:
+                audio_map = "[agame]"
             else:
-                graph += f";[{game_idx}:a]volume=0.5[aout]"
-                audio_map = "[aout]"
-                use_graph_audio = True
+                graph += f";anullsrc=r=48000:cl=stereo:d={duration:.3f}[asilent]"
+                audio_map = "[asilent]"
+
+        # Склейка интро/аутро вокруг основного клипа (после прожига ASS на основном клипе)
+        if has_bumpers:
+            concat_pairs: List[str] = []
+            if intro_path is not None and intro_idx >= 0:
+                i_dur = max(0.2, float(intro_info.get("duration") or 1.0))
+                graph += (
+                    f";[{intro_idx}:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+                    f"crop={w}:{h},fps=30,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v_intro]"
+                )
+                if intro_info.get("has_audio"):
+                    graph += f";[{intro_idx}:a]{_AFMT},asetpts=PTS-STARTPTS[a_intro]"
+                else:
+                    graph += f";anullsrc=r=48000:cl=stereo:d={i_dur:.3f}[a_intro]"
+                concat_pairs.append("[v_intro][a_intro]")
+
+            graph += f";{audio_map}{_AFMT},asetpts=PTS-STARTPTS[a_main_c]"
+            concat_pairs.append("[vmain][a_main_c]")
+
+            if outro_path is not None and outro_idx >= 0:
+                o_dur = max(0.2, float(outro_info.get("duration") or 1.0))
+                graph += (
+                    f";[{outro_idx}:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+                    f"crop={w}:{h},fps=30,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v_outro]"
+                )
+                if outro_info.get("has_audio"):
+                    graph += f";[{outro_idx}:a]{_AFMT},asetpts=PTS-STARTPTS[a_outro]"
+                else:
+                    graph += f";anullsrc=r=48000:cl=stereo:d={o_dur:.3f}[a_outro]"
+                concat_pairs.append("[v_outro][a_outro]")
+
+            graph += f";{''.join(concat_pairs)}concat=n={len(concat_pairs)}:v=1:a=1[v][aout]"
+            audio_map = "[aout]"
+
         built += ["-filter_complex", graph, "-map", vlabel]
-        if info["has_audio"] or game_has_audio:
+        if has_any_audio:
             built += ["-map", audio_map]
             if not use_graph_audio:
                 built += ["-af", _audio_filter()]
             built += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         else:
             built += ["-an"]
+        out_t = total_duration if has_bumpers else duration
         built += ["-threads", str(resources.ffmpeg_threads())] + video_args + [
-            "-r", "30", "-t", f"{duration:.3f}", "-movflags", "+faststart", "-shortest", str(output)]
+            "-r", "30", "-t", f"{out_t:.3f}", "-movflags", "+faststart"]
+        if not has_bumpers:
+            built += ["-shortest"]
+        built += [str(output)]
         return built
 
     encoder_mode = _encoder_mode()

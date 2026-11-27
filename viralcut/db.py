@@ -51,11 +51,19 @@ CREATE TABLE IF NOT EXISTS clips (
     words TEXT,
     settings TEXT,
     error TEXT,
+    approval_status TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_clips_project ON clips(project_id, idx);
+CREATE TABLE IF NOT EXISTS profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -86,7 +94,7 @@ def session() -> Iterator[sqlite3.Connection]:
 
 # Точка входа миграций: первое изменение схемы не должно ломать базы
 # пользователей. Сейчас схема = версия 1, дальше добавляем шаги списком.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -103,6 +111,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
             " SELECT MAX(rowid) FROM clips GROUP BY project_id, idx)")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_clips_project_idx ON clips(project_id, idx)")
+    if current < 3:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS profiles ("
+            " id TEXT PRIMARY KEY,"
+            " name TEXT NOT NULL,"
+            " config TEXT NOT NULL,"
+            " created_at REAL NOT NULL,"
+            " updated_at REAL NOT NULL"
+            ")"
+        )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(clips)").fetchall()}
+        if "approval_status" not in cols:
+            conn.execute("ALTER TABLE clips ADD COLUMN approval_status TEXT")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
@@ -346,3 +367,67 @@ def reset_stale_jobs() -> None:
                 ("ready" if ready else "error", "Рендер прерван перезапуском приложения",
                  time.time(), clip["id"]),
             )
+
+
+def set_clip_approval(cid: str, approval_status: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Обновляет статус одобрения клипа (approved | skipped | pending | None)."""
+    with session() as conn:
+        conn.execute(
+            "UPDATE clips SET approval_status=?, updated_at=? WHERE id=?",
+            (approval_status, time.time(), cid),
+        )
+    return get_clip(cid)
+
+
+def list_profiles() -> List[Dict[str, Any]]:
+    with session() as conn:
+        rows = conn.execute("SELECT * FROM profiles ORDER BY updated_at DESC").fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = _row_to_dict(row)
+        item["config"] = json.loads(item["config"] or "{}")
+        out.append(item)
+    return out
+
+
+def get_profile(profile_id: str) -> Optional[Dict[str, Any]]:
+    with session() as conn:
+        row = conn.execute("SELECT * FROM profiles WHERE id=?", (profile_id,)).fetchone()
+    if not row:
+        return None
+    item = _row_to_dict(row)
+    item["config"] = json.loads(item["config"] or "{}")
+    return item
+
+
+def create_profile(name: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    pid = "kit_" + uuid.uuid4().hex[:10]
+    now = time.time()
+    clean_name = " ".join(str(name or "Brand Kit").split())[:80] or "Brand Kit"
+    with session() as conn:
+        conn.execute(
+            "INSERT INTO profiles (id, name, config, created_at, updated_at) VALUES (?,?,?,?,?)",
+            (pid, clean_name, json.dumps(config or {}, ensure_ascii=False), now, now),
+        )
+    return get_profile(pid) or {"id": pid, "name": clean_name, "config": config, "created_at": now, "updated_at": now}
+
+
+def update_profile(profile_id: str, *, name: Optional[str] = None,
+                   config: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    existing = get_profile(profile_id)
+    if not existing:
+        return None
+    new_name = existing["name"] if name is None else (" ".join(str(name).split())[:80] or existing["name"])
+    new_cfg = existing["config"] if config is None else config
+    with session() as conn:
+        conn.execute(
+            "UPDATE profiles SET name=?, config=?, updated_at=? WHERE id=?",
+            (new_name, json.dumps(new_cfg, ensure_ascii=False), time.time(), profile_id),
+        )
+    return get_profile(profile_id)
+
+
+def delete_profile(profile_id: str) -> bool:
+    with session() as conn:
+        cur = conn.execute("DELETE FROM profiles WHERE id=?", (profile_id,))
+        return cur.rowcount > 0

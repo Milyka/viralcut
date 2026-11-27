@@ -10,11 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import utils
 from .config import DATA_DIR, ffmpeg
@@ -91,6 +92,25 @@ def _ensure_builtin(spec: Dict[str, Any]) -> Optional[Path]:
         return None
 
 
+def _clean_tags(raw: Any) -> List[str]:
+    if isinstance(raw, str):
+        parts = re.split(r"[,;\s]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        parts = [str(x) for x in raw]
+    else:
+        return []
+    out: List[str] = []
+    seen = set()
+    for part in parts:
+        tag = re.sub(r"[^\w\-А-Яа-яЁё]+", "", str(part or "").strip().lower())[:28]
+        if tag and tag not in seen:
+            seen.add(tag)
+            out.append(tag)
+            if len(out) >= 12:
+                break
+    return out
+
+
 def list_clips() -> List[Dict[str, Any]]:
     """Возвращает все доступные ролики слоя игры (загруженные + встроенные)."""
     out: List[Dict[str, Any]] = []
@@ -106,6 +126,7 @@ def list_clips() -> List[Dict[str, Any]]:
             "duration": round(float(item.get("duration") or 0), 1),
             "size": path.stat().st_size,
             "builtin": False,
+            "tags": _clean_tags(item.get("tags")),
             "url": f"/api/game-clips/{item['id']}/video",
         })
     for spec in BUILTIN_LOOPS:
@@ -115,6 +136,7 @@ def list_clips() -> List[Dict[str, Any]]:
             "duration": 8.0,
             "size": (GAME_DIR / spec["file"]).stat().st_size if (GAME_DIR / spec["file"]).is_file() else 0,
             "builtin": True,
+            "tags": ["builtin"],
             "url": f"/api/game-clips/{spec['id']}/video",
         })
     return out
@@ -136,7 +158,7 @@ def resolve_path(clip_id: Optional[str]) -> Optional[Path]:
     return None
 
 
-def add_clip(filename: str, data_path: Path) -> Dict[str, Any]:
+def add_clip(filename: str, data_path: Path, tags: Any = None) -> Dict[str, Any]:
     """Регистрирует загруженный пользователем ролик слоя игры."""
     suffix = Path(filename or "game.mp4").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -149,6 +171,7 @@ def add_clip(filename: str, data_path: Path) -> Dict[str, Any]:
     GAME_DIR.mkdir(parents=True, exist_ok=True)
     target = GAME_DIR / f"{cid}{suffix}"
     data_path.replace(target)
+    clean_tags = _clean_tags(tags)
     entry = {
         "id": cid,
         "name": clean_name,
@@ -156,6 +179,7 @@ def add_clip(filename: str, data_path: Path) -> Dict[str, Any]:
         "duration": round(float(info["duration"]), 2),
         "width": int(info["width"]),
         "height": int(info["height"]),
+        "tags": clean_tags,
         "created_at": round(time.time(), 2),
     }
     with _LOCK:
@@ -168,6 +192,42 @@ def add_clip(filename: str, data_path: Path) -> Dict[str, Any]:
         "duration": entry["duration"],
         "size": target.stat().st_size,
         "builtin": False,
+        "tags": clean_tags,
+        "url": f"/api/game-clips/{cid}/video",
+    }
+
+
+def update_clip(clip_id: str, *, name: Optional[str] = None,
+                tags: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+    """Обновляет название и/или теги пользовательского ролика слоя игры."""
+    cid = str(clip_id or "").strip()
+    if not cid or any(spec["id"] == cid for spec in BUILTIN_LOOPS):
+        return None
+    updated: Optional[Dict[str, Any]] = None
+    with _LOCK:
+        items = _load_meta()
+        for item in items:
+            if item.get("id") == cid:
+                if name is not None:
+                    clean_name = re.sub(r"[^\w\-. ()А-Яа-яЁё]+", " ", str(name)).strip()[:64]
+                    if clean_name:
+                        item["name"] = clean_name
+                if tags is not None:
+                    item["tags"] = _clean_tags(tags)
+                updated = dict(item)
+                break
+        if updated is not None:
+            _save_meta(items)
+    if updated is None:
+        return None
+    path = GAME_DIR / str(updated.get("file") or "")
+    return {
+        "id": cid,
+        "name": updated.get("name") or path.stem,
+        "duration": round(float(updated.get("duration") or 0), 1),
+        "size": path.stat().st_size if path.is_file() else 0,
+        "builtin": False,
+        "tags": _clean_tags(updated.get("tags")),
         "url": f"/api/game-clips/{cid}/video",
     }
 
@@ -250,3 +310,88 @@ def split_heights(total_h: int, split: str) -> tuple[int, int]:
     bot_h -= bot_h % 2
     top_h = total_h - bot_h
     return top_h, bot_h
+
+
+def normalize_pool_config(raw: Any) -> Optional[Dict[str, Any]]:
+    """Приводит конфиг пула случайных фонов (Game Pool) к безопасной схеме."""
+    if not isinstance(raw, dict) or not raw.get("enabled"):
+        return None
+    split = str(raw.get("split") or "60/40").strip()
+    if split not in SPLIT_PRESETS:
+        split = "60/40"
+    tag = str(raw.get("tag") or "all").strip().lower()[:28] or "all"
+    raw_ids = raw.get("clip_ids")
+    clip_ids: List[str] = []
+    if isinstance(raw_ids, (list, tuple)):
+        seen = set()
+        for item in raw_ids:
+            cid = str(item or "").strip()
+            if cid and cid not in seen:
+                seen.add(cid)
+                clip_ids.append(cid)
+    try:
+        top_zoom = max(1.0, min(2.5, float(raw.get("top_zoom") or 1.0)))
+    except (TypeError, ValueError):
+        top_zoom = 1.0
+    try:
+        game_zoom = max(1.0, min(2.5, float(raw.get("game_zoom") or 1.0)))
+    except (TypeError, ValueError):
+        game_zoom = 1.0
+    return {
+        "enabled": True,
+        "tag": tag,
+        "clip_ids": clip_ids,
+        "split": split,
+        "top_zoom": round(top_zoom, 2),
+        "game_zoom": round(game_zoom, 2),
+        "audio": bool(raw.get("audio") or raw.get("game_audio")),
+    }
+
+
+def pick_random_from_pool(pool_cfg: Any, clip_len: float,
+                          exclude_ids: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
+    """Выбирает случайный фон и случайное смещение старта для одного клипа."""
+    pool = normalize_pool_config(pool_cfg)
+    if not pool:
+        return None
+    all_clips = list_clips()
+    if not all_clips:
+        return None
+
+    clip_ids = set(pool.get("clip_ids") or [])
+    tag = str(pool.get("tag") or "all").strip().lower()
+    if clip_ids:
+        candidates = [c for c in all_clips if c["id"] in clip_ids]
+    elif tag and tag != "all":
+        candidates = [c for c in all_clips if tag in (c.get("tags") or [])]
+    else:
+        user_clips = [c for c in all_clips if not c.get("builtin")]
+        candidates = user_clips if user_clips else list(all_clips)
+
+    if not candidates:
+        candidates = list(all_clips)
+
+    excl = set(exclude_ids or [])
+    if len(candidates) > 1 and excl:
+        fresh = [c for c in candidates if c["id"] not in excl]
+        if fresh:
+            candidates = fresh
+
+    chosen = random.choice(candidates)
+    game_dur = max(0.0, float(chosen.get("duration") or 0.0))
+    need_len = max(0.0, float(clip_len or 0.0))
+    if game_dur > need_len + 1.0:
+        max_start = max(0.0, game_dur - need_len)
+    else:
+        max_start = max(0.0, game_dur - 1.0)
+    start_offset = random.uniform(0.0, max_start) if max_start > 0.0 else 0.0
+
+    return normalize_config({
+        "enabled": True,
+        "clip_id": chosen["id"],
+        "split": pool["split"],
+        "start": round(start_offset, 1),
+        "top_zoom": pool["top_zoom"],
+        "game_zoom": pool["game_zoom"],
+        "audio": pool["audio"],
+    })

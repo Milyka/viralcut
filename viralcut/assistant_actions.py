@@ -263,8 +263,12 @@ _CLIP_ORDINALS = {
 }
 _CLIP_NUMBER = r"(?:№\s*)?(\d{1,2})|(" + "|".join(_CLIP_ORDINALS) + r")[а-яё]+"
 _CLIP_LABEL = r"клип(?:а|е|у|ом)?"
-_CLIP_EDIT_FIELDS = ("mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
-                     "cut_pauses", "subtitles", "sub_speed", "text")
+_STYLE_KEYS = (
+    "mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
+    "sub_anim", "sub_outline", "sub_outline_width", "sub_outline_color",
+    "cut_pauses", "subtitles",
+)
+_CLIP_EDIT_FIELDS = _STYLE_KEYS + ("sub_speed", "text")
 
 
 def _clip_number(text: str) -> Optional[int]:
@@ -480,9 +484,7 @@ def execute(action: Dict[str, Any],
             return {"ok": False, "type": kind, "message": "База проектов сейчас недоступна."}
         if not project:
             return {"ok": False, "type": kind, "message": "Проект не найден."}
-        patch = {key: action[key] for key in
-                 ("mode", "aspect", "accent", "sub_size", "sub_font", "sub_position",
-                  "subtitles", "cut_pauses") if key in action}
+        patch = {key: action[key] for key in _STYLE_KEYS if key in action}
         if not patch:
             return {"ok": False, "type": kind, "message": "Не указано, что поменять."}
         merged = pipeline_module.normalize_options({**(project.get("options") or {}), **patch})
@@ -555,8 +557,7 @@ def execute(action: Dict[str, Any],
 def _start_cut(action: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
     """Запускает нарезку: по ссылке или по уже загруженному проекту."""
     options: Dict[str, Any] = {}
-    for key in ("count", "min_dur", "max_dur", "aspect", "mode", "subtitles",
-                "accent", "sub_size", "sub_font", "sub_position", "cut_pauses", "language"):
+    for key in ("count", "min_dur", "max_dur", "cut_mode", "ai_preset", "language") + _STYLE_KEYS:
         if key in action:
             options[key] = action[key]
     if action.get("ai_mode"):

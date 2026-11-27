@@ -475,7 +475,8 @@ def _normalize_plan(items: List[Dict[str, Any]], duration: float,
 
 def plan_clips(segments: List[Dict[str, Any]], duration: float,
                options: Optional[Dict[str, Any]] = None,
-               instruction: str = "") -> Dict[str, Any]:
+               instruction: str = "",
+               multimodal_peaks: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Просит модель выбрать вирусные моменты и вернуть их с хуками.
 
     Возвращает границы клипов в секундах и подписи. Никаких правок в проекте
@@ -494,6 +495,24 @@ def plan_clips(segments: List[Dict[str, Any]], duration: float,
     transcript = _transcript_for_prompt(segments)
     if not transcript.strip():
         raise AIError("Расшифровка пустая — выбирать моменты не из чего.")
+    peaks_block = ""
+    if multimodal_peaks:
+        lines: List[str] = []
+        for pk in multimodal_peaks[:15]:
+            st = float(pk.get("start") or 0.0)
+            en = float(pk.get("end") or st)
+            reasons = ", ".join(str(r) for r in (pk.get("reasons") or []))
+            sample = str(pk.get("sample") or "").strip()
+            sample_part = f' ("{sample}")' if sample else ""
+            lines.append(
+                f"- {int(st // 60):02d}:{int(st % 60):02d}-{int(en // 60):02d}:{int(en % 60):02d} "
+                f"[{reasons or 'hype'}] score={float(pk.get('score') or 0):.2f}{sample_part}"
+            )
+        if lines:
+            peaks_block = (
+                "\n[TIMELINE HYPE PEAKS — пики реакций чата, звука и монтажа, отдавай им приоритет]:\n"
+                + "\n".join(lines) + "\n"
+            )
     user_text = (
         f"Задание от пользователя: {instruction.strip() or 'нарежь самые вирусные моменты'}\n"
         f"Длительность записи: {float(duration):.0f} сек.\n"
@@ -502,7 +521,8 @@ def plan_clips(segments: List[Dict[str, Any]], duration: float,
         "неожиданный вывод, эмоция. Не начинай с приветствия, не режь посреди слова.\n"
         "Хук — первая строка на экране: 3–7 слов, без точки в конце.\n"
         "Верни ТОЛЬКО JSON по схеме, без пояснений:\n"
-        f"{PLAN_SCHEMA_EXAMPLE}\n\n"
+        f"{PLAN_SCHEMA_EXAMPLE}\n"
+        f"{peaks_block}\n"
         "Расшифровка с таймкодами:\n" + transcript
     )
     payload = {

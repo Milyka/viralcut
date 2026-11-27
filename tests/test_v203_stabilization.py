@@ -314,8 +314,7 @@ class TestLiveEvenDbWhisperAndAssistant(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 transcribe.delete_model("medium")
 
-        with mock.patch.object(transcribe, "_ACTIVE_TRANSCRIBES", 1), \
-             mock.patch.object(transcribe, "_ACTIVE_MODEL_KEY", "medium"):
+        with mock.patch.dict(transcribe._ACTIVE_BY_MODEL, {"medium": 1}, clear=False):
             with self.assertRaises(RuntimeError):
                 transcribe.delete_model("medium")
 

@@ -1368,3 +1368,45 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
             path.unlink(missing_ok=True)
             path = mp4
     return path
+
+
+def fetch_chat_replay(url: str, dest_dir: Path, browser: Optional[str] = None,
+                      timeout: int = 35) -> Optional[Path]:
+    """Best-effort скачивание повтора чата YouTube (.live_chat.json). Никогда не роняет проект."""
+    existing = [p for p in dest_dir.glob("*.live_chat.json") if p.is_file() and p.stat().st_size > 0]
+    if existing:
+        return existing[0]
+    if not url or not is_youtube(url):
+        return None
+
+    import threading
+    import yt_dlp
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    opts: Dict[str, Any] = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "subtitleslangs": ["live_chat"],
+        "outtmpl": str(dest_dir / "chat.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "retries": 1,
+        "socket_timeout": 15,
+    }
+    opts.update(_cookie_opts(browser))
+
+    def _run() -> None:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.extract_info(url, download=True)
+        except Exception:  # noqa: BLE001 — отсутствие чата не является ошибкой
+            pass
+
+    worker = threading.Thread(target=_run, name="yt-live-chat", daemon=True)
+    worker.start()
+    worker.join(max(5, int(timeout or 35)))
+
+    found = [p for p in dest_dir.glob("*.live_chat.json") if p.is_file() and p.stat().st_size > 0]
+    return found[0] if found else None

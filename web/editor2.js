@@ -124,23 +124,35 @@
     return state.gameClips;
   }
 
+  async function loadBgmList() {
+    try {
+      const res = await api("/api/bgm");
+      state.bgmTracks = Array.isArray(res.tracks) ? res.tracks : [];
+    } catch (_) {
+      state.bgmTracks = [];
+    }
+    return state.bgmTracks;
+  }
+
   window.openEditor = async function openMegaEditor(clipId) {
     if (!state.detail) return;
     const project = state.detail.project;
     const clip = state.detail.clips.find((c) => c.id === clipId);
     if (!clip) return;
 
-    await loadGameClipsList();
+    await Promise.all([loadGameClipsList(), loadBgmList()]);
     const s = { ...(project.options || {}), ...(clip.settings || {}) };
     const glIn = s.game_layer && typeof s.game_layer === "object" ? s.game_layer : {};
+    const bgmIn = s.bgm && typeof s.bgm === "object" ? s.bgm : {};
     const defaultGameId = glIn.clip_id || (state.gameClips[0] ? state.gameClips[0].id : "builtin_neon_waves");
+    const defaultBgmId = bgmIn.track_id || (state.bgmTracks[0] ? state.bgmTracks[0].id : "");
 
     const origStart = Number(clip.start || 0);
     const origEnd = Number(clip.end || origStart + 15);
     const projDur = Number(project.duration || 0);
     const maxSourceDur = projDur > 0 ? Math.max(origEnd, projDur) : origEnd;
-    const windowMin = Math.max(0, origStart - 12);
-    const windowMax = Math.min(maxSourceDur, origEnd + 12);
+    let windowMin = Math.max(0, origStart - 12);
+    let windowMax = Math.min(maxSourceDur, origEnd + 12);
     const MIN_CLIP_DUR = 3.0;
 
     const ed = {
@@ -168,6 +180,18 @@
       subOutlineWidth: Number(s.sub_outline_width ?? 7),
       subOutlineColor: s.sub_outline_color || "#000000",
       cutPauses: Boolean(s.cut_pauses),
+      punchInZoom: Boolean(s.punch_in_zoom),
+      autoDualSplit: s.auto_dual_split !== false,
+      watermark: s.watermark && typeof s.watermark === "object" ? { ...s.watermark } : null,
+      introAssetId: String(s.intro_asset_id || ""),
+      outroAssetId: String(s.outro_asset_id || ""),
+      bgm: {
+        enabled: Boolean(bgmIn.enabled && defaultBgmId),
+        track_id: defaultBgmId,
+        volume_db: Number(bgmIn.volume_db ?? -14),
+        ducking: bgmIn.ducking !== false,
+        duck_db: Number(bgmIn.duck_db ?? -22),
+      },
       game: {
         enabled: Boolean(glIn.enabled),
         clip_id: defaultGameId,
@@ -406,6 +430,39 @@
               <div>
                 <div class="hint" style="margin-bottom:4px">Текст субтитров (тайминги сохраняются)</div>
                 <textarea id="edTextInput" rows="3" style="width:100%;padding:9px 11px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid var(--separator);font-size:12.5px;resize:vertical">${esc(ed.text)}</textarea>
+              </div>
+            </section>
+
+            <section class="insp-card">
+              <div class="insp-card-head">
+                <h4>Фоновая музыка (BGM) и эффекты</h4>
+                <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+                  <input type="checkbox" id="edBgmOn" ${ed.bgm.enabled ? "checked" : ""} /> BGM
+                </label>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center">
+                <select id="edBgmSel" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px">
+                  ${state.bgmTracks.length
+                    ? state.bgmTracks.map((t) => `<option value="${esc(t.id)}" ${t.id === ed.bgm.track_id ? "selected" : ""}>${esc(t.name)} (${t.duration} с)</option>`).join("")
+                    : `<option value="">Треков пока нет</option>`}
+                </select>
+                <button class="mini-chip" id="edBgmUploadBtn" type="button">+ Загрузить</button>
+                <input id="edBgmFile" type="file" accept=".mp3,.wav,.m4a,.ogg,.flac,audio/*" class="hidden" />
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12px;color:var(--muted)">
+                <label>
+                  Громкость: <b id="edBgmVolVal">${ed.bgm.volume_db} дБ</b>
+                  <input id="edBgmVol" type="range" min="-30" max="-6" step="1" value="${ed.bgm.volume_db}" style="width:100%" />
+                </label>
+                <label>
+                  Приглушение: <b id="edBgmDuckVal">${ed.bgm.duck_db} дБ</b>
+                  <input id="edBgmDuck" type="range" min="-28" max="-12" step="1" value="${ed.bgm.duck_db}" style="width:100%" />
+                </label>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--text)">
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edBgmDuckOn" ${ed.bgm.ducking ? "checked" : ""} /> Авто-приглушение под речью</label>
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edPunchZoom" ${ed.punchInZoom ? "checked" : ""} /> Hook Punch-In Zoom</label>
+                <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="edDualSplit" ${ed.autoDualSplit ? "checked" : ""} /> Авто 2-спикерный сплит</label>
               </div>
             </section>
 
@@ -856,6 +913,11 @@
     $("#edGameOff")?.addEventListener("input", (e) => {
       ed.game.start = Number(e.target.value);
       if ($("#edGameOffVal")) $("#edGameOffVal").textContent = `${ed.game.start.toFixed(0)} с`;
+      if (gameVid.duration > 0) {
+        try {
+          gameVid.currentTime = (ed.game.start + (mainVid.currentTime || 0)) % gameVid.duration;
+        } catch (_) {}
+      }
     });
     $("#edGameAudio")?.addEventListener("change", (e) => {
       ed.game.audio = e.target.checked;
@@ -908,13 +970,33 @@
       } catch (err) { toast(err.message, "err"); }
     });
 
-    // Numeric trim inputs
+    // Numeric trim inputs (expand filmstrip window when edited outside bounds)
+    function ensureTrimBounds() {
+      let expanded = false;
+      if (ed.start < windowMin) {
+        windowMin = Math.max(0, ed.start - 6);
+        expanded = true;
+      }
+      if (ed.end > windowMax) {
+        windowMax = Math.min(maxSourceDur, Math.max(ed.end + 6, windowMin + MIN_CLIP_DUR));
+        expanded = true;
+      }
+      if (expanded) {
+        const img = $("#megaFilmstrip .filmstrip-img");
+        if (img) {
+          img.style.opacity = "";
+          img.src = `/api/projects/${project.id}/clips/${clip.id}/strip.jpg?start=${windowMin.toFixed(2)}&end=${windowMax.toFixed(2)}`;
+        }
+      }
+    }
     $("#edStart")?.addEventListener("change", (e) => {
       ed.start = Math.max(0, Math.min(ed.end - MIN_CLIP_DUR, Number(e.target.value) || 0));
+      ensureTrimBounds();
       updateTrimUI();
     });
     $("#edEnd")?.addEventListener("change", (e) => {
       ed.end = Math.min(maxSourceDur, Math.max(ed.start + MIN_CLIP_DUR, Number(e.target.value) || ed.start + MIN_CLIP_DUR));
+      ensureTrimBounds();
       updateTrimUI();
     });
 
@@ -948,6 +1030,48 @@
       }
     }).catch(() => {});
 
+    // BGM & Effects controls
+    function populateBgmSelect() {
+      const sel = $("#edBgmSel");
+      if (!sel) return;
+      if (!state.bgmTracks.length) {
+        sel.innerHTML = `<option value="">Треков пока нет</option>`;
+        return;
+      }
+      sel.innerHTML = state.bgmTracks.map((t) => `<option value="${esc(t.id)}" ${t.id === ed.bgm.track_id ? "selected" : ""}>${esc(t.name)} (${t.duration} с)</option>`).join("");
+      if (!ed.bgm.track_id && state.bgmTracks[0]) ed.bgm.track_id = state.bgmTracks[0].id;
+    }
+    $("#edBgmOn")?.addEventListener("change", (e) => { ed.bgm.enabled = e.target.checked; });
+    $("#edBgmSel")?.addEventListener("change", (e) => { ed.bgm.track_id = e.target.value; });
+    $("#edBgmVol")?.addEventListener("input", (e) => {
+      ed.bgm.volume_db = Number(e.target.value);
+      if ($("#edBgmVolVal")) $("#edBgmVolVal").textContent = `${ed.bgm.volume_db} дБ`;
+    });
+    $("#edBgmDuck")?.addEventListener("input", (e) => {
+      ed.bgm.duck_db = Number(e.target.value);
+      if ($("#edBgmDuckVal")) $("#edBgmDuckVal").textContent = `${ed.bgm.duck_db} дБ`;
+    });
+    $("#edBgmDuckOn")?.addEventListener("change", (e) => { ed.bgm.ducking = e.target.checked; });
+    $("#edPunchZoom")?.addEventListener("change", (e) => { ed.punchInZoom = e.target.checked; });
+    $("#edDualSplit")?.addEventListener("change", (e) => { ed.autoDualSplit = e.target.checked; });
+    $("#edBgmUploadBtn")?.addEventListener("click", () => $("#edBgmFile")?.click());
+    $("#edBgmFile")?.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const added = await api("/api/bgm", { method: "POST", body: fd });
+        await loadBgmList();
+        ed.bgm.track_id = added.id;
+        ed.bgm.enabled = true;
+        if ($("#edBgmOn")) $("#edBgmOn").checked = true;
+        populateBgmSelect();
+        toast(`Трек добавлен: ${added.name}`);
+      } catch (err) { toast(err.message, "err"); }
+    });
+
     function buildPayload() {
       const payload = {
         start: Number(ed.start.toFixed(2)),
@@ -972,7 +1096,13 @@
         sub_outline_color: ed.subOutlineColor,
         cut_pauses: ed.cutPauses,
         game_layer: ed.game,
+        bgm: ed.bgm.enabled && ed.bgm.track_id ? ed.bgm : null,
+        punch_in_zoom: ed.punchInZoom,
+        auto_dual_split: ed.autoDualSplit,
       };
+      if (ed.watermark) payload.watermark = ed.watermark;
+      if (ed.introAssetId) payload.intro_asset_id = ed.introAssetId;
+      if (ed.outroAssetId) payload.outro_asset_id = ed.outroAssetId;
       if (ed.textDirty) payload.text = ed.text;
       if (ed.subFree) payload.sub_free = ed.subFree;
       return payload;

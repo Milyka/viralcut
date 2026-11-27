@@ -147,6 +147,10 @@ function refreshFontSelects(selected, target) {
     if (!el) return;
     const value = (target && sel === target) ? selected : el.value;
     el.innerHTML = fontOptionsHTML(value);
+    el.value = value;
+    if (target && sel === target) {
+      el.dispatchEvent(new Event("change"));
+    }
   });
 }
 
@@ -675,6 +679,9 @@ async function loadAiStatus() {
   }
   const hint = $("#aiModeHint");
   if (hint) hint.textContent = aiModeHint();
+  if (!state.current && (state.nav === "new" || state.nav === "settings")) {
+    window.KRLZ2?.renderNavView?.(true);
+  }
   return state.ai;
 }
 
@@ -707,7 +714,16 @@ function heroOptions() {
     cookies_browser: state.opts.cookies,
     ai_mode: useLlm,
     ai_prompt: state.opts.aiPrompt || "",
-    autostart: Boolean(useLlm || cutMode === "even")
+    autostart: Boolean(useLlm || cutMode === "even"),
+    profile_id: state.opts.profileId || "",
+    watermark: state.opts.watermark || null,
+    intro_asset_id: state.opts.introAssetId || "",
+    outro_asset_id: state.opts.outroAssetId || "",
+    game_pool: state.opts.gamePool || null,
+    bgm: state.opts.bgm || null,
+    punch_in_zoom: Boolean(state.opts.punchInZoom),
+    auto_dual_split: state.opts.autoDualSplit !== false,
+    bot_deliver: Boolean(state.opts.botDeliver),
   };
 }
 
@@ -868,6 +884,7 @@ async function createFromProbe(height) {
     resetModalState();
     $("#modal").classList.add("hidden");
     $("#modal").innerHTML = "";
+    window.KRLZ2?.clearNewUrl?.();
     await loadProjects();
     openProject(project.id);
     if (!options.autostart) openTemplate(project.id);
@@ -1126,9 +1143,14 @@ function clipsGridHTML() {
     const partsLine = sp ? [
       ["хук", sp.hook], ["подача", sp.retention], ["эмоции", sp.emotion],
       ["конкретика", sp.specificity], ["завершённость", sp.completeness],
-      ["реакция", sp.reaction], ["монтаж", sp.visual],
-    ].filter(([k, v]) => typeof v === "number" && (v > 0.02 || !["реакция", "монтаж"].includes(k)))
+      ["реакция", sp.reaction], ["чат", sp.chat], ["монтаж", sp.visual],
+    ].filter(([k, v]) => typeof v === "number" && (v > 0.02 || !["реакция", "монтаж", "чат"].includes(k)))
       .map(([k, v]) => `<span>${k} ${Math.round(v * 100)}</span>`).join("") : "";
+    const approvalBadge = c.approval_status === "approved"
+      ? `<span class="status-pill done" style="font-size:10.5px;padding:2px 7px">Одобрен</span>`
+      : c.approval_status === "skipped"
+        ? `<span class="status-pill" style="font-size:10.5px;padding:2px 7px">Пропущен</span>`
+        : "";
     if (c.status === "error") {
       return `<div class="clip-card${wide}" data-clip="${c.id}">
         <div class="clip-media" style="display:grid;place-items:center;padding:16px;text-align:center">
@@ -1156,7 +1178,10 @@ function clipsGridHTML() {
         <div class="dur-badge">${fmtDur(dur)}</div>
       </div>
       <div class="clip-body">
-        <div class="clip-title">${esc(c.title || "Без названия")}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+          <div class="clip-title">${esc(c.title || "Без названия")}</div>
+          ${approvalBadge}
+        </div>
         <div class="clip-time">${fmtDur(c.start)} – ${fmtDur(c.end)}</div>
         ${partsLine ? `<div class="clip-parts">${partsLine}</div>` : ""}
         <div class="clip-tools">
@@ -1165,6 +1190,7 @@ function clipsGridHTML() {
           </a>
           <a class="srt-btn" href="/api/clips/${c.id}/subtitles.srt" download title="Скачать субтитры (SRT)">SRT</a>
           <button class="glass-btn" data-action="copy" title="Копировать подпись" aria-label="Копировать подпись">${ICONS.copy}</button>
+          <button class="glass-btn" data-action="send-bot" title="Отправить в Telegram/Discord бот" aria-label="Отправить в бот"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
           ${c.settings?.segments ? "" : `<button class="glass-btn" data-action="edit" title="Редактировать клип" aria-label="Редактировать клип">${ICONS.edit}</button>`}
           <button class="glass-btn danger" data-action="delete-clip" title="Удалить клип" aria-label="Удалить клип">${ICONS.trash}</button>
         </div>
@@ -1658,6 +1684,14 @@ $("#main").addEventListener("click", async (e) => {
       }
       loadProjects();
       toast("Клип удалён");
+    } catch (err) { toast(err.message, "err"); }
+    return;
+  }
+
+  if (action === "send-bot" && clipId) {
+    try {
+      await api(`/api/clips/${clipId}/send-bot`, { method: "POST" });
+      toast("Клип отправлен в бот одобрения");
     } catch (err) { toast(err.message, "err"); }
     return;
   }
@@ -3445,8 +3479,12 @@ async function openSettings() {
       if (clearAiKey && !aiKey) payload.clear_ai_key = true;
       else if (aiKey && aiProvider !== "local") payload.ai_key = aiKey;
       const saved = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
+      state.settingsData = saved;
       closeModal();
-      loadAiStatus();
+      await loadAiStatus();
+      if (!state.current && (state.nav === "new" || state.nav === "settings")) {
+        window.KRLZ2?.renderNavView?.(true);
+      }
       if (saved.encoder_warning) toast(saved.encoder_warning, "err");
       else toast("Настройки сохранены");
       pollSystem();

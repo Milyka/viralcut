@@ -27,6 +27,8 @@ STYLE_KEYS = (
     "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free",
     "sub_speed", "sub_anim", "sub_outline", "sub_outline_width",
     "sub_outline_color", "cut_pauses", "game_layer",
+    "watermark", "intro_asset_id", "outro_asset_id", "bgm",
+    "punch_in_zoom", "auto_dual_split",
 )
 
 AI_PRESET_PROMPTS: Dict[str, str] = {
@@ -65,6 +67,15 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "sub_outline_width": 7,
     "sub_outline_color": "#000000",
     "game_layer": None,
+    "game_pool": None,
+    "watermark": None,
+    "intro_asset_id": "",
+    "outro_asset_id": "",
+    "bgm": None,
+    "punch_in_zoom": False,
+    "auto_dual_split": True,
+    "bot_deliver": False,
+    "profile_id": "",
     "max_height": 1080,
     "exact_quality": False,
     "segments": False,
@@ -116,9 +127,18 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         opts["sub_outline_width"] = 7
     ocol = str(opts.get("sub_outline_color") or "#000000").strip()
     opts["sub_outline_color"] = ocol if subtitles.is_valid_color(ocol) else "#000000"
-    from . import game_layer as _gl
+    from . import bgm as _bgm, game_layer as _gl, profiles as _profiles
 
     opts["game_layer"] = _gl.normalize_config(opts.get("game_layer"))
+    opts["game_pool"] = _gl.normalize_pool_config(opts.get("game_pool"))
+    opts["watermark"] = _profiles.normalize_watermark(opts.get("watermark"))
+    opts["intro_asset_id"] = str(opts.get("intro_asset_id") or "").strip()
+    opts["outro_asset_id"] = str(opts.get("outro_asset_id") or "").strip()
+    opts["bgm"] = _bgm.normalize_config(opts.get("bgm"))
+    opts["punch_in_zoom"] = bool(opts.get("punch_in_zoom", False))
+    opts["auto_dual_split"] = bool(opts.get("auto_dual_split", True))
+    opts["bot_deliver"] = bool(opts.get("bot_deliver", False))
+    opts["profile_id"] = str(opts.get("profile_id") or "").strip()
     try:
         size = int(opts.get("sub_size", 118))
         if size < 70:
@@ -372,6 +392,12 @@ def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         "sub_outline_width": int(opts.get("sub_outline_width", 7)),
         "sub_outline_color": opts.get("sub_outline_color", "#000000"),
         "game_layer": opts.get("game_layer"),
+        "watermark": opts.get("watermark"),
+        "intro_asset_id": opts.get("intro_asset_id") or "",
+        "outro_asset_id": opts.get("outro_asset_id") or "",
+        "bgm": opts.get("bgm"),
+        "punch_in_zoom": bool(opts.get("punch_in_zoom", False)),
+        "auto_dual_split": bool(opts.get("auto_dual_split", True)),
         "segments": bool(opts.get("segments")), "cut_pauses": bool(opts.get("cut_pauses")),
     }
 
@@ -605,6 +631,10 @@ def prepare_project(pid: str, *, _skip_autostart: bool = False) -> None:
             res_txt = f"{info['height']}p"
         _update(pid, status="review", progress=100, error=None,
                 stage=f"Видео готово ({res_txt}{took_txt}) · настройте субтитры")
+        try:
+            db.merge_meta(pid, {"size_bytes": int(source.stat().st_size)})
+        except OSError:
+            pass
         if opts.get("autostart") and not _skip_autostart:
             from . import jobs
 
@@ -713,6 +743,26 @@ def process_project(pid: str) -> None:
 
             preset_hint = AI_PRESET_PROMPTS.get(str(opts.get("ai_preset") or "best"), "")
             full_instruction = " ".join(x for x in (preset_hint, opts.get("ai_prompt") or "") if x).strip()
+
+            # Best-effort загрузка/парсинг повтора чата (YouTube / Twitch VOD)
+            chat_curve = None
+            try:
+                from . import chat_replay
+
+                chat_path = None
+                if project["url"].startswith(("https://", "http://")):
+                    chat_path = downloader.fetch_chat_replay(
+                        project["url"], workdir, browser=opts.get("cookies_browser") or None,
+                    )
+                chat_curve = chat_replay.load_or_build(workdir, duration, chat_path=chat_path)
+                if chat_curve:
+                    db.merge_meta(pid, {
+                        "chat_messages": int(chat_curve.get("total_messages") or 0),
+                        "chat_peaks": len(chat_curve.get("peaks") or []),
+                    })
+            except Exception:
+                chat_curve = None
+
             if opts.get("ai_mode"):
                 progress(0.55, "ИИ выбирает вирусные моменты")
                 try:
@@ -721,11 +771,22 @@ def process_project(pid: str) -> None:
                     if not ai_module.configured():
                         raise ai_module.AIError(
                             "Не настроен ключ ИИ — включите его в настройках или выключите ИИ-режим.")
+                    peaks = []
+                    try:
+                        curve, _mean_db = analyze.cached_energy_curve(source, audio_track=audio_track)
+                        react = analyze.audio_reactions(source, audio_track=audio_track)
+                        sc = analyze.scene_changes(source)
+                        peaks = analyze.extract_multimodal_peaks(
+                            duration, curve, 0.25, reactions=react, scenes=sc, chat_curve=chat_curve,
+                        )
+                    except Exception:
+                        peaks = []
                     plan = ai_module.plan_clips(
                         transcript["segments"], duration,
                         options={"count": opts["count"], "min_dur": opts["min_dur"],
                                  "max_dur": opts["max_dur"]},
                         instruction=full_instruction,
+                        multimodal_peaks=peaks or None,
                     )
                     found = _ai_found(plan["clips"], transcript["segments"])
                     db.merge_meta(pid, {"ai_model": plan.get("model"),
@@ -748,6 +809,7 @@ def process_project(pid: str) -> None:
                     min_dur=opts["min_dur"], max_dur=opts["max_dur"],
                     target_dur=opts["target_dur"],
                     audio_track=audio_track,
+                    chat_curve=chat_curve,
                 )
                 found = _apply_preset_boost(found, str(opts.get("ai_preset") or "best"))
         if not found:
@@ -759,11 +821,27 @@ def process_project(pid: str) -> None:
         clip_word = "клипа" if (total % 10 == 1 and total % 100 != 11) else "клипов"
         progress(0.60, f"Рендер {total} {clip_word}")
         clips = []
+        game_pool = opts.get("game_pool")
+        last_game_id: Optional[str] = None
+        if isinstance(game_pool, dict) and game_pool.get("enabled"):
+            from . import game_layer as _gl
+        else:
+            _gl = None
         for i, cand in enumerate(found):
+            per_clip_settings = {**clip_settings, "score_parts": cand.get("parts") or {}}
+            if _gl is not None and game_pool:
+                picked_gl = _gl.pick_random_from_pool(
+                    game_pool,
+                    float(cand["end"]) - float(cand["start"]),
+                    exclude_ids=[last_game_id] if last_game_id else None,
+                )
+                if picked_gl:
+                    per_clip_settings["game_layer"] = picked_gl
+                    last_game_id = picked_gl.get("clip_id")
             clip = db.add_clip(
                 pid, i, cand["start"], cand["end"], cand["score"], cand["title"],
                 cand["hook"], cand["caption"], cand["words"],
-                {**clip_settings, "score_parts": cand.get("parts") or {}},
+                per_clip_settings,
             )
             clips.append(clip)
 
@@ -782,7 +860,7 @@ def process_project(pid: str) -> None:
                     state["cancel"] = True
                 return False
             try:
-                _render_one(source, workdir, clip, clip_settings, lambda p: None, opts)
+                _render_one(source, workdir, clip, clip.get("settings") or clip_settings, lambda p: None, opts)
             except Cancelled:
                 with lock:
                     state["cancel"] = True
@@ -800,6 +878,13 @@ def process_project(pid: str) -> None:
                 state["done"] += 1
                 done = state["done"]
             progress(0.60 + (done / max(1, total)) * 0.40, f"Рендер: {done} из {total} готово")
+            if opts.get("bot_deliver"):
+                try:
+                    from . import bot_notify
+
+                    bot_notify.notify_clip_ready_async(clip["id"])
+                except Exception:
+                    pass
             return True
 
         workers = min(_render_workers(), max(1, total))
@@ -819,7 +904,11 @@ def process_project(pid: str) -> None:
             "клипа" if 2 <= rendered % 10 <= 4 and not 12 <= rendered % 100 <= 14 else "клипов")
         _update(pid, status="done", progress=100, error=None,
                 stage=f"Готово: {rendered} {word} за {elapsed:.0f} с")
-        db.merge_meta(pid, {"elapsed": elapsed, "clips": rendered})
+        try:
+            proj_size = _dir_size(workdir)
+        except Exception:
+            proj_size = 0
+        db.merge_meta(pid, {"elapsed": elapsed, "clips": rendered, "size_bytes": proj_size})
 
     except Cancelled:
         _update(pid, status="cancelled", stage="Обработка отменена", error=None)
@@ -970,14 +1059,17 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
     if mode == "auto":
         try:
             crop_path = reframe.build_crop_path(
-                source, clip["start"], clip["end"], aspect=settings.get("aspect", "9:16"))
+                source, clip["start"], clip["end"],
+                aspect=settings.get("aspect", "9:16"),
+                allow_dual_split=bool(settings.get("auto_dual_split", True)),
+            )
             if crop_path and spans:
                 crop_path = reframe.remap_crop_path(crop_path, spans, float(clip["start"]))
         except Exception:
             crop_path = None
         # если лиц почти нет (скринкаст, слайды) — заполняем кадр по центру,
         # а не оставляем размытые поля: так просили пользователи
-        if crop_path and crop_path.get("coverage", 1.0) < 0.18:
+        if crop_path and crop_path.get("layout") != "dual_split" and crop_path.get("coverage", 1.0) < 0.18:
             mode = "crop"
             crop_path = None
     thumb_path = workdir / "thumbs" / f"{clip['id']}.jpg"
@@ -994,6 +1086,12 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 _w, _h = render.ASPECTS.get(settings.get("aspect", "9:16"), render.ASPECTS["9:16"])
                 top_h, _bot_h = _gl.split_heights(_h, gl_cfg["split"])
                 split_ratio = top_h / float(_h)
+            elif (
+                not gl_cfg and not settings.get("sub_free")
+                and isinstance(crop_path, dict) and crop_path.get("layout") == "dual_split"
+            ):
+                # В 2-спикерном стеке 50/50 сажаем нижние субтитры ровно на шов между камерами
+                split_ratio = 0.50
             text = subtitles.build_ass(
                 words, sub_start, sub_end,
                 hook=clip.get("hook") or clip.get("title") or "",
@@ -1024,6 +1122,11 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
             crop_path=crop_path, pip=pip_options(opts or {}),
             audio_track=audio_track, spans=spans or None,
             game_layer=settings.get("game_layer"),
+            watermark=settings.get("watermark"),
+            intro_asset_id=settings.get("intro_asset_id") or None,
+            outro_asset_id=settings.get("outro_asset_id") or None,
+            bgm=settings.get("bgm"),
+            punch_in_zoom=bool(settings.get("punch_in_zoom", False)),
         )
 
         thumb = preview = None
@@ -1080,7 +1183,8 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
                 "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free", "sub_speed",
                 "sub_anim", "sub_outline", "sub_outline_width", "sub_outline_color",
-                "cut_pauses", "game_layer"):
+                "cut_pauses", "game_layer", "watermark", "intro_asset_id", "outro_asset_id",
+                "bgm", "punch_in_zoom", "auto_dual_split"):
         if key in payload and payload[key] is not None:
             settings[key] = payload[key]
     if "game_layer" in payload and payload["game_layer"] is None:
@@ -1089,6 +1193,18 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         from . import game_layer as _gl
 
         settings["game_layer"] = _gl.normalize_config(payload["game_layer"])
+    if "watermark" in payload and payload["watermark"] is None:
+        settings["watermark"] = None
+    elif "watermark" in payload and isinstance(payload["watermark"], dict):
+        from . import profiles as _profiles
+
+        settings["watermark"] = _profiles.normalize_watermark(payload["watermark"])
+    if "bgm" in payload and payload["bgm"] is None:
+        settings["bgm"] = None
+    elif "bgm" in payload and isinstance(payload["bgm"], dict):
+        from . import bgm as _bgm
+
+        settings["bgm"] = _bgm.normalize_config(payload["bgm"])
     if "sub_free" in payload and payload["sub_free"] is None:
         settings["sub_free"] = None
     elif "sub_position" in payload and "sub_free" not in payload:
@@ -1419,7 +1535,7 @@ def apply_style_to_project(pid: str, style: Dict[str, Any]) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise KeyError("Проект не найден")
-    nullable_keys = {"game_layer", "sub_free"}
+    nullable_keys = {"game_layer", "sub_free", "watermark", "bgm"}
     patch = {
         k: style[k] for k in STYLE_KEYS
         if k in style and (style[k] is not None or k in nullable_keys)
@@ -1441,6 +1557,38 @@ def apply_style_to_project(pid: str, style: Dict[str, Any]) -> Dict[str, Any]:
         if _jobs.submit_rerender(clip["id"], dict(patch)):
             queued += 1
     return {"ok": True, "clips": queued, "total": len(clips), "applied": patch}
+
+
+def export_approved_clip(cid: str) -> Dict[str, Any]:
+    """Экспортирует одобренный клип (.mp4 + .srt + .txt) в папку Approved."""
+    clip = db.get_clip(cid)
+    if not clip or not clip.get("path") or not Path(clip["path"]).is_file():
+        raise FileNotFoundError("Готовый видеофайл клипа не найден")
+    from . import settings as app_settings
+
+    conf = app_settings.get()
+    clips_dir = str(conf.get("clips_dir") or "").strip()
+    base_dir = (Path(clips_dir) / "Approved") if clips_dir else (DATA_DIR / "exports" / "approved")
+    base_dir.mkdir(parents=True, exist_ok=True)
+    safe_title = re.sub(r"[^\w\- А-Яа-яЁё]+", "", str(clip.get("title") or "clip")).strip()[:48] or "clip"
+    stem = f"{safe_title}_{cid[:6]}"
+    mp4_dest = base_dir / f"{stem}.mp4"
+    srt_dest = base_dir / f"{stem}.srt"
+    txt_dest = base_dir / f"{stem}.txt"
+    shutil.copy2(Path(clip["path"]), mp4_dest)
+    try:
+        srt_text = clip_srt(clip)
+    except Exception:
+        srt_text = ""
+    srt_dest.write_text(srt_text, encoding="utf-8")
+    caption_body = "\n\n".join(x for x in (clip.get("title") or "", clip.get("caption") or "") if x).strip()
+    txt_dest.write_text(caption_body, encoding="utf-8")
+    return {
+        "folder": str(base_dir),
+        "mp4": str(mp4_dest),
+        "srt": str(srt_dest),
+        "txt": str(txt_dest),
+    }
 
 
 # --- управление местом на диске и очистка (улучшение 5) ----------------------

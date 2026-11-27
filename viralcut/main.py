@@ -18,8 +18,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (agent, ai, assistant, cpu_limit, custom_fonts, db, game_layer,
-               gpu_pref, jobs, pipeline, render, resources,
+from . import (agent, ai, assistant, bgm, bot_notify, cpu_limit, custom_fonts, db,
+               game_layer, gpu_pref, jobs, pipeline, profiles, render, resources,
                settings as app_settings, system_stats, transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
@@ -80,6 +80,36 @@ class SettingsIn(BaseModel):
     palette_b: Optional[str] = None
     whisper_model: Optional[str] = None
     render_quality: Optional[str] = None
+    default_profile_id: Optional[str] = None
+    tg_enabled: Optional[bool] = None
+    tg_token: Optional[str] = None
+    clear_tg_token: Optional[bool] = None
+    tg_allowed_users: Optional[str] = None
+    tg_chat_id: Optional[str] = None
+    dc_enabled: Optional[bool] = None
+    dc_token: Optional[str] = None
+    clear_dc_token: Optional[bool] = None
+    dc_channel_id: Optional[str] = None
+    dc_allowed_users: Optional[str] = None
+
+
+class ProfileIn(BaseModel):
+    name: str
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProfilePatchIn(BaseModel):
+    name: Optional[str] = None
+    config: Optional[Dict[str, Any]] = None
+
+
+class GameClipPatchIn(BaseModel):
+    name: Optional[str] = None
+    tags: Optional[Any] = None
+
+
+class BotTestIn(BaseModel):
+    platform: str
 
 
 class ProjectPatchIn(BaseModel):
@@ -134,6 +164,12 @@ class ClipEdit(BaseModel):
     sub_outline_width: Optional[int] = None
     sub_outline_color: Optional[str] = None
     game_layer: Optional[Dict[str, Any]] = None
+    watermark: Optional[Dict[str, Any]] = None
+    intro_asset_id: Optional[str] = None
+    outro_asset_id: Optional[str] = None
+    bgm: Optional[Dict[str, Any]] = None
+    punch_in_zoom: Optional[bool] = None
+    auto_dual_split: Optional[bool] = None
     cut_pauses: Optional[bool] = None
 
 
@@ -164,7 +200,17 @@ async def _lifespan(_app: FastAPI):
     import threading as _threading
 
     _threading.Thread(target=render.hw_encoder, name="hw-probe", daemon=True).start()
-    yield
+    try:
+        bot_notify.start_bots()
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    try:
+        yield
+    finally:
+        try:
+            bot_notify.stop_bots()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # CORS не нужен: страница отдаётся с того же origin, что и API. Без него чужая
@@ -191,7 +237,7 @@ async def _security_guard(request, call_next):
     """Защита локального сервера от DNS rebinding и межсайтовых запросов (CSRF)."""
     host_hdr = request.headers.get("host", "")
     hostname = _extract_hostname(host_hdr)
-    if hostname and hostname not in _LOOPBACK_HOSTS:
+    if not hostname or hostname not in _LOOPBACK_HOSTS:
         return JSONResponse({"detail": "Недопустимый заголовок Host"}, status_code=403)
 
     if request.method.upper() in _MUTATING_METHODS:
@@ -224,7 +270,7 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
     from . import render, subtitles
 
     raw_dump = body.model_dump()
-    nullable_keys = {"game_layer", "sub_free"}
+    nullable_keys = {"game_layer", "sub_free", "watermark", "bgm"}
     data = {
         k: v for k, v in raw_dump.items()
         if v is not None or (k in nullable_keys and k in body.model_fields_set)
@@ -258,6 +304,10 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
         raise HTTPException(400, "Неизвестный цвет обводки")
     if "game_layer" in data:
         data["game_layer"] = game_layer.normalize_config(data["game_layer"])
+    if "watermark" in data:
+        data["watermark"] = profiles.normalize_watermark(data["watermark"])
+    if "bgm" in data:
+        data["bgm"] = bgm.normalize_config(data["bgm"])
     if "sub_font" in data and not subtitles.font_exists(data["sub_font"]):
         raise HTTPException(400, "Шрифт не найден")
     if "sub_size" in data:
@@ -500,6 +550,8 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
         gpu_pref.apply()
         if "encoder" in patch or "gpu_preference" in patch:
             render.reset_hw_encoder()
+        if any(k.startswith(("tg_", "dc_", "clear_tg_", "clear_dc_")) for k in patch):
+            bot_notify.restart_bots()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     data = app_settings.public(data)
@@ -763,6 +815,197 @@ def game_clip_video(gid: str) -> FileResponse:
     return FileResponse(path, media_type=media_type)
 
 
+@app.patch("/api/game-clips/{gid}")
+def game_clip_patch(gid: str, body: GameClipPatchIn) -> Dict[str, Any]:
+    updated = game_layer.update_clip(gid, name=body.name, tags=body.tags)
+    if not updated:
+        raise HTTPException(404, "Пользовательский ролик слоя игры не найден")
+    return updated
+
+
+# --- Brand Kits (Profiles) & Brand Assets ------------------------------------
+
+@app.get("/api/profiles")
+def profiles_list() -> Dict[str, Any]:
+    return {"profiles": profiles.list_profiles()}
+
+
+@app.post("/api/profiles")
+def profiles_create(body: ProfileIn) -> Dict[str, Any]:
+    try:
+        return profiles.create_profile(body.name, body.config)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.patch("/api/profiles/{profile_id}")
+def profiles_patch(profile_id: str, body: ProfilePatchIn) -> Dict[str, Any]:
+    updated = profiles.update_profile(profile_id, name=body.name, config=body.config)
+    if not updated:
+        raise HTTPException(404, "Профиль (Brand Kit) не найден")
+    return updated
+
+
+@app.delete("/api/profiles/{profile_id}")
+def profiles_delete(profile_id: str) -> Dict[str, Any]:
+    if not profiles.delete_profile(profile_id):
+        raise HTTPException(404, "Профиль (Brand Kit) не найден")
+    return {"ok": True}
+
+
+@app.get("/api/brand-assets")
+def brand_assets_list(kind: Optional[str] = None) -> Dict[str, Any]:
+    return {"assets": profiles.list_assets(kind=kind)}
+
+
+@app.post("/api/brand-assets")
+async def brand_assets_upload(
+    kind: str = Form(...),
+    name: str = Form(""),
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    suffix = Path(file.filename or "").suffix.lower()
+    profiles.BRAND_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = profiles.BRAND_ASSETS_DIR / f".upload-{uuid.uuid4().hex[:8]}{suffix}"
+    limit = profiles.MAX_WATERMARK_BYTES if kind == "watermark" else profiles.MAX_BUMPER_BYTES
+    written = 0
+    try:
+        with tmp.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > limit:
+                    raise HTTPException(413, "Файл превышает допустимый размер")
+                out.write(chunk)
+        return profiles.add_asset(kind, file.filename or f"asset{suffix}", tmp, name=name or None)
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except (ValueError, utils.MediaError) as exc:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"Не удалось загрузить брендовый ассет: {str(exc)[:200]}") from exc
+
+
+_ASSET_MIME = {
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
+
+
+@app.get("/api/brand-assets/{aid}/file")
+def brand_asset_file(aid: str) -> FileResponse:
+    path = profiles.resolve_asset(aid)
+    if not path or not path.is_file():
+        raise HTTPException(404, "Брендовый ассет не найден")
+    return FileResponse(path, media_type=_ASSET_MIME.get(path.suffix.lower(), "application/octet-stream"))
+
+
+@app.delete("/api/brand-assets/{aid}")
+def brand_asset_delete(aid: str) -> Dict[str, Any]:
+    if not profiles.delete_asset(aid):
+        raise HTTPException(404, "Брендовый ассет не найден")
+    return {"ok": True}
+
+
+# --- BGM Library -------------------------------------------------------------
+
+@app.get("/api/bgm")
+def bgm_list() -> Dict[str, Any]:
+    return {"tracks": bgm.list_tracks()}
+
+
+@app.post("/api/bgm")
+async def bgm_upload(file: UploadFile = File(...), name: str = Form("")) -> Dict[str, Any]:
+    suffix = Path(file.filename or "track.mp3").suffix.lower()
+    if suffix not in bgm.ALLOWED_SUFFIXES:
+        raise HTTPException(400, f"Формат {suffix or '?'} не поддерживается для BGM")
+    bgm.BGM_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = bgm.BGM_DIR / f".upload-{uuid.uuid4().hex[:8]}{suffix}"
+    written = 0
+    try:
+        with tmp.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > bgm.MAX_BYTES:
+                    raise HTTPException(413, "Аудиофайл превышает 100 МБ")
+                out.write(chunk)
+        return bgm.add_track(file.filename or f"track{suffix}", tmp, name=name or None)
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except (ValueError, utils.MediaError) as exc:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"Не удалось загрузить BGM: {str(exc)[:200]}") from exc
+
+
+_AUDIO_MIME = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+@app.get("/api/bgm/{bid}/audio")
+def bgm_audio(bid: str) -> FileResponse:
+    path = bgm.resolve_path(bid)
+    if not path or not path.is_file():
+        raise HTTPException(404, "Трек BGM не найден")
+    return FileResponse(path, media_type=_AUDIO_MIME.get(path.suffix.lower(), "audio/mpeg"))
+
+
+@app.delete("/api/bgm/{bid}")
+def bgm_delete(bid: str) -> Dict[str, Any]:
+    if not bgm.delete_track(bid):
+        raise HTTPException(404, "Трек BGM не найден")
+    return {"ok": True}
+
+
+# --- Telegram / Discord Approval Bots ----------------------------------------
+
+@app.get("/api/bots/status")
+def bots_status() -> Dict[str, Any]:
+    return bot_notify.status()
+
+
+@app.post("/api/bots/test")
+def bots_test(body: BotTestIn) -> Dict[str, Any]:
+    res = bot_notify.test_bot(body.platform)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "Проверка бота не удалась")
+    return res
+
+
+@app.post("/api/clips/{cid}/send-bot")
+def clip_send_bot(cid: str) -> Dict[str, Any]:
+    clip = db.get_clip(cid)
+    if not clip:
+        raise HTTPException(404, "Клип не найден")
+    res = bot_notify.notify_clip_ready(cid)
+    if not res:
+        raise HTTPException(400, "Ни Telegram, ни Discord бот не включён в настройках")
+    any_ok = any(isinstance(v, dict) and v.get("ok") for v in res.values())
+    if not any_ok:
+        err = next((v.get("error") for v in res.values() if isinstance(v, dict) and v.get("error")), "Ошибка отправки")
+        raise HTTPException(400, err)
+    return {"ok": True, "results": res}
+
+
 @app.get("/api/diagnostics")
 def diagnostics_log(tail: int = 40) -> Dict[str, Any]:
     """Разбор app.log: падение, последний этап, ошибки — для окна «Диагностика»."""
@@ -848,12 +1091,23 @@ def _thumb_path_to_url(pid: str, raw_thumb: str) -> str:
 def _enrich_project(p: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     pid = p["id"]
     thumb_url = ""
-    size_bytes = 0
+    meta = p.get("meta") if isinstance(p.get("meta"), dict) else {}
+    size_bytes = int(meta.get("size_bytes") or meta.get("download_bytes") or 0)
+    if size_bytes <= 0 and p.get("source"):
+        try:
+            sp = Path(p["source"])
+            if sp.is_file():
+                size_bytes = int(sp.stat().st_size)
+        except OSError:
+            size_bytes = 0
     if summary is not None:
         total_clips = int(summary.get("total_clips") or 0)
         ready_clips = int(summary.get("ready_clips") or 0)
         if summary.get("thumb"):
             thumb_url = _thumb_path_to_url(pid, str(summary["thumb"]))
+            upd = float(summary.get("updated_at") or 0.0)
+            if thumb_url and upd > 0:
+                thumb_url = f"{thumb_url}?v={int(upd)}"
     else:
         clips = db.list_clips(pid)
         ready = [c for c in clips if c.get("status") == "ready"]
@@ -864,6 +1118,9 @@ def _enrich_project(p: Dict[str, Any], summary: Optional[Dict[str, Any]] = None)
                 tp = Path(c["thumb"])
                 if tp.is_file():
                     thumb_url = _thumb_path_to_url(pid, c["thumb"])
+                    upd = float(c.get("updated_at") or 0.0)
+                    if thumb_url and upd > 0:
+                        thumb_url = f"{thumb_url}?v={int(upd)}"
                     break
     if not thumb_url and p.get("source") and Path(p["source"]).is_file():
         thumb_url = f"/api/projects/{pid}/frame.jpg?t=2&width=480"

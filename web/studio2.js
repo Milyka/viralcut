@@ -60,7 +60,101 @@
     activeSig: "",
     saveThemeTimer: null,
     storage: null,
+    profiles: [],
+    brandAssets: [],
+    bgmTracks: [],
+    gameClips: [],
+    botStatus: null,
   };
+
+  async function loadProAssetsData() {
+    try {
+      const [prof, assets, bgmRes, glRes, bots] = await Promise.all([
+        api("/api/profiles").catch(() => ({ profiles: [] })),
+        api("/api/brand-assets").catch(() => ({ assets: [] })),
+        api("/api/bgm").catch(() => ({ tracks: [] })),
+        api("/api/game-clips").catch(() => ({ clips: [] })),
+        api("/api/bots/status").catch(() => null),
+      ]);
+      ui.profiles = Array.isArray(prof?.profiles) ? prof.profiles : [];
+      ui.brandAssets = Array.isArray(assets?.assets) ? assets.assets : [];
+      ui.bgmTracks = Array.isArray(bgmRes?.tracks) ? bgmRes.tracks : [];
+      ui.gameClips = Array.isArray(glRes?.clips) ? glRes.clips : [];
+      ui.botStatus = bots;
+    } catch (_) {}
+  }
+
+  function applyBrandKitToOpts(kit) {
+    if (!kit || !kit.config) return;
+    const c = kit.config;
+    state.opts.profileId = kit.id;
+    if (c.aspect) state.opts.aspect = c.aspect;
+    if (c.mode) state.opts.mode = c.mode;
+    if (c.cut_mode) state.opts.cutMode = c.cut_mode;
+    if (c.count != null) state.opts.count = Number(c.count);
+    if (c.language) state.opts.language = c.language;
+    if (c.cut_pauses != null) state.opts.cutPauses = Boolean(c.cut_pauses);
+    if (c.subtitles != null) state.opts.subtitles = Boolean(c.subtitles);
+    if (c.sub_font) state.opts.subFont = c.sub_font;
+    if (c.sub_size) state.opts.subSize = Number(c.sub_size);
+    if (c.sub_position) state.opts.subPos = c.sub_position;
+    if (c.sub_offset != null) state.opts.subOffset = Number(c.sub_offset);
+    if (c.sub_speed) state.opts.subSpeed = c.sub_speed;
+    if (c.sub_anim) state.opts.subAnim = c.sub_anim;
+    if (c.accent) state.opts.accent = c.accent;
+    if (c.sub_outline != null) state.opts.subOutline = Boolean(c.sub_outline);
+    if (c.sub_outline_width != null) state.opts.subOutlineWidth = Number(c.sub_outline_width);
+    if (c.sub_outline_color) state.opts.subOutlineColor = c.sub_outline_color;
+    if (c.ai_mode != null) { state.opts.aiMode = Boolean(c.ai_mode); state.opts.aiModeTouched = true; }
+    if (c.ai_preset) state.opts.aiPreset = c.ai_preset;
+    if (c.ai_prompt != null) state.opts.aiPrompt = String(c.ai_prompt);
+    state.opts.watermark = c.watermark || null;
+    state.opts.introAssetId = c.intro_asset_id || "";
+    state.opts.outroAssetId = c.outro_asset_id || "";
+    state.opts.gamePool = c.game_pool || null;
+    state.opts.bgm = c.bgm || null;
+    state.opts.punchInZoom = Boolean(c.punch_in_zoom);
+    state.opts.autoDualSplit = c.auto_dual_split !== false;
+    state.opts.botDeliver = Boolean(c.bot_deliver);
+  }
+
+  function currentOptsAsKitConfig() {
+    const o = state.opts;
+    const d = DUR_PRESETS[o.dur] || DUR_PRESETS["20-45"];
+    return {
+      aspect: o.aspect || "9:16",
+      mode: o.mode || "auto",
+      cut_mode: o.cutMode || "ai",
+      count: Number(o.count ?? 10),
+      min_dur: d.min,
+      max_dur: d.max,
+      target_dur: d.target,
+      language: o.language || "auto",
+      cut_pauses: Boolean(o.cutPauses),
+      subtitles: o.subtitles !== false,
+      sub_font: o.subFont || "montserrat",
+      sub_size: Number(o.subSize || 118),
+      sub_position: o.subPos || "bottom",
+      sub_offset: Number(o.subOffset || 0),
+      sub_speed: o.subSpeed || "calm",
+      sub_anim: o.subAnim || "pop",
+      accent: o.accent || "yellow",
+      sub_outline: o.subOutline !== false,
+      sub_outline_width: Number(o.subOutlineWidth ?? 7),
+      sub_outline_color: o.subOutlineColor || "#000000",
+      ai_mode: Boolean(o.aiMode),
+      ai_preset: o.aiPreset || "best",
+      ai_prompt: o.aiPrompt || "",
+      watermark: o.watermark || null,
+      intro_asset_id: o.introAssetId || "",
+      outro_asset_id: o.outroAssetId || "",
+      game_pool: o.gamePool || null,
+      bgm: o.bgm || null,
+      punch_in_zoom: Boolean(o.punchInZoom),
+      auto_dual_split: o.autoDualSplit !== false,
+      bot_deliver: Boolean(o.botDeliver),
+    };
+  }
 
   function fmtBytes(bytes) {
     const b = Number(bytes || 0);
@@ -384,9 +478,21 @@
       <section class="page-head">
         <div>
           <h1>Новый проект</h1>
-          <p>Настройте режим, пресет и стиль — справа сразу виден итог перед запуском.</p>
+          <p>Настройте профиль канала, режим, пресет и стиль — справа сразу виден итог перед запуском.</p>
         </div>
       </section>
+
+      ${ui.profiles.length ? `
+      <div class="studio-card" style="margin-bottom:14px;padding:12px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span class="hint" style="font-weight:600;color:var(--text)">Brand Kit:</span>
+            <button class="mini-chip ${!o.profileId ? "active" : ""}" data-apply-kit="" type="button">Без профиля</button>
+            ${ui.profiles.map((k) => `<button class="mini-chip ${o.profileId === k.id ? "active" : ""}" data-apply-kit="${esc(k.id)}" type="button">${esc(k.name)}</button>`).join("")}
+          </div>
+          <button class="mini-chip" id="newManageKitsBtn" type="button">Настроить профили</button>
+        </div>
+      </div>` : ""}
 
       <div class="new-layout">
         <div class="new-col">
@@ -505,6 +611,61 @@
               </div>
             </div>
           </div>
+
+          <div class="studio-card">
+            <div class="card-title-row"><h3>${o.cutMode !== "even" ? "5." : "4."} Автоматизация, пул фонов и музыка</h3></div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+              <div>
+                <label style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;margin-bottom:8px;cursor:pointer">
+                  <input type="checkbox" id="newGamePoolOn" ${o.gamePool?.enabled ? "checked" : ""} />
+                  <span>Пул Слоя игры (случайный фон)</span>
+                </label>
+                ${o.gamePool?.enabled ? `
+                  <div style="display:flex;flex-direction:column;gap:8px">
+                    <select id="newGamePoolTag" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px">
+                      <option value="all" ${(o.gamePool.tag || "all") === "all" ? "selected" : ""}>Все фоны (приоритет своих)</option>
+                      ${Array.from(new Set(ui.gameClips.flatMap((c) => c.tags || []))).map((tag) => `<option value="${esc(tag)}" ${o.gamePool.tag === tag ? "selected" : ""}>Тег: ${esc(tag)}</option>`).join("")}
+                    </select>
+                    <div class="chip-row">
+                      ${["60/40", "50/50", "65/35", "70/30"].map((sp) => `<button class="mini-chip ${(o.gamePool.split || "60/40") === sp ? "active" : ""}" data-pool-split="${sp}" type="button">${sp}</button>`).join("")}
+                    </div>
+                  </div>
+                ` : `<div class="hint">Каждому клипу подбирается свой случайный фон и старт без повторов.</div>`}
+              </div>
+
+              <div>
+                <label style="display:flex;align-items:center;gap:7px;font-size:13px;font-weight:600;margin-bottom:8px;cursor:pointer">
+                  <input type="checkbox" id="newBgmOn" ${o.bgm?.enabled ? "checked" : ""} ${ui.bgmTracks.length ? "" : "disabled"} />
+                  <span>Фоновая музыка (BGM)</span>
+                </label>
+                ${ui.bgmTracks.length ? `
+                  <div style="display:flex;flex-direction:column;gap:8px">
+                    <select id="newBgmSel" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12.5px">
+                      ${ui.bgmTracks.map((t) => `<option value="${esc(t.id)}" ${(o.bgm?.track_id || ui.bgmTracks[0]?.id) === t.id ? "selected" : ""}>${esc(t.name)} (${t.duration} с)</option>`).join("")}
+                    </select>
+                    <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+                      <input type="checkbox" id="newBgmDuck" ${o.bgm?.ducking !== false ? "checked" : ""} /> Авто-приглушение под речью (-22 дБ)
+                    </label>
+                  </div>
+                ` : `<div class="hint">Загрузите MP3/WAV треки в Настройках или Редакторе клипа.</div>`}
+              </div>
+
+              <div style="display:flex;flex-direction:column;gap:9px;justify-content:center">
+                <label style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer">
+                  <input type="checkbox" id="newPunchZoom" ${o.punchInZoom ? "checked" : ""} />
+                  <span>Hook Punch-In Zoom (первые 3 сек)</span>
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer">
+                  <input type="checkbox" id="newDualSplit" ${o.autoDualSplit !== false ? "checked" : ""} />
+                  <span>Авто 2-спикерный сплит (интервью)</span>
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:7px;font-size:12.5px;cursor:pointer">
+                  <input type="checkbox" id="newBotDeliver" ${o.botDeliver ? "checked" : ""} />
+                  <span>Отправлять готовые клипы в бот</span>
+                </label>
+              </div>
+            </div>
+          </div>
         </div>
 
         <aside class="studio-card summary-sticky">
@@ -522,6 +683,10 @@
             <div class="summary-row"><span>Кадрирование</span><b>${esc(framingLabels[o.mode] || o.mode)}</b></div>
             <div class="summary-row"><span>Язык</span><b>${esc(langLabels[o.language || "auto"] || "Авто")}</b></div>
             <div class="summary-row"><span>Субтитры</span><b>${o.subtitles && o.cutMode !== "even" ? `Вкл · ${(o.subAnim || "pop").toUpperCase()}` : "Выкл"}</b></div>
+            ${o.profileId ? `<div class="summary-row"><span>Brand Kit</span><b>${esc((ui.profiles.find((k) => k.id === o.profileId) || {}).name || "Выбран")}</b></div>` : ""}
+            ${o.gamePool?.enabled ? `<div class="summary-row"><span>Пул фонов</span><b>${esc(o.gamePool.split || "60/40")} · ${esc(o.gamePool.tag || "all")}</b></div>` : ""}
+            ${o.bgm?.enabled ? `<div class="summary-row"><span>Музыка</span><b>${o.bgm.ducking !== false ? "BGM + Ducking" : "BGM"}</b></div>` : ""}
+            ${o.botDeliver ? `<div class="summary-row"><span>Одобрение</span><b>Telegram / Discord</b></div>` : ""}
           </div>
 
           <button class="btn-launch-big" id="newLaunchBtn" type="button">
@@ -534,6 +699,61 @@
   }
 
   function bindNewProject() {
+    $$("[data-apply-kit]").forEach((b) => {
+      b.addEventListener("click", () => {
+        const kid = b.dataset.applyKit;
+        if (!kid) {
+          state.opts.profileId = "";
+          renderNavView(true);
+          return;
+        }
+        const kit = ui.profiles.find((k) => k.id === kid);
+        if (kit) {
+          applyBrandKitToOpts(kit);
+          toast(`Применён Brand Kit «${kit.name}»`);
+          renderNavView(true);
+        }
+      });
+    });
+    $("#newManageKitsBtn")?.addEventListener("click", () => navigate("settings"));
+    $("#newGamePoolOn")?.addEventListener("change", (e) => {
+      if (e.target.checked) {
+        state.opts.gamePool = { enabled: true, tag: state.opts.gamePool?.tag || "all", split: state.opts.gamePool?.split || "60/40", clip_ids: [] };
+      } else {
+        state.opts.gamePool = null;
+      }
+      renderNavView(true);
+    });
+    $("#newGamePoolTag")?.addEventListener("change", (e) => {
+      if (state.opts.gamePool) state.opts.gamePool.tag = e.target.value;
+      renderNavView(true);
+    });
+    $$("[data-pool-split]").forEach((b) => {
+      b.addEventListener("click", () => {
+        if (state.opts.gamePool) state.opts.gamePool.split = b.dataset.poolSplit;
+        renderNavView(true);
+      });
+    });
+    $("#newBgmOn")?.addEventListener("change", (e) => {
+      if (e.target.checked && ui.bgmTracks.length) {
+        const tid = $("#newBgmSel")?.value || ui.bgmTracks[0].id;
+        state.opts.bgm = { enabled: true, track_id: tid, volume_db: -14, ducking: $("#newBgmDuck")?.checked !== false, duck_db: -22 };
+      } else {
+        state.opts.bgm = null;
+      }
+      renderNavView(true);
+    });
+    $("#newBgmSel")?.addEventListener("change", (e) => {
+      if (state.opts.bgm) state.opts.bgm.track_id = e.target.value;
+    });
+    $("#newBgmDuck")?.addEventListener("change", (e) => {
+      if (state.opts.bgm) state.opts.bgm.ducking = e.target.checked;
+      renderNavView(true);
+    });
+    $("#newPunchZoom")?.addEventListener("change", (e) => { state.opts.punchInZoom = e.target.checked; });
+    $("#newDualSplit")?.addEventListener("change", (e) => { state.opts.autoDualSplit = e.target.checked; });
+    $("#newBotDeliver")?.addEventListener("change", (e) => { state.opts.botDeliver = e.target.checked; renderNavView(true); });
+
     $$("[data-src-tab]").forEach((b) => {
       b.addEventListener("click", () => {
         if (b.disabled) return;
@@ -635,6 +855,7 @@
             method: "POST",
             body: JSON.stringify({ url, options: heroOptions() }),
           });
+          ui.newUrl = "";
           await loadProjects();
           openProject(project.id);
         } catch (err) { toast(err.message, "err"); }
@@ -914,6 +1135,7 @@
         api("/api/settings"),
         api("/api/whisper/models"),
         api("/api/storage"),
+        loadProAssetsData(),
       ]);
       state.settingsData = conf;
       state.whisperData = whisper;
@@ -1061,6 +1283,131 @@
                 <button class="btn-ghost danger" id="setCleanAllBtn" type="button">Очистить кэш и исходники</button>
               </div>
             </div>
+          </div>
+        </div>
+
+        <div class="studio-card settings-span-2">
+          <div class="card-title-row">
+            <h2>Brand Kits (Профили каналов) и брендовые ассеты</h2>
+            <span class="hint">Водяной знак, интро/аутро (до 15 с) и библиотека BGM</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:14px">
+            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:9px">
+              <b style="font-size:13px">Сохранённые Brand Kits (${ui.profiles.length})</b>
+              ${ui.profiles.length ? ui.profiles.map((k) => `
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-radius:8px;background:var(--surface);border:1px solid var(--border)">
+                  <div style="min-width:0">
+                    <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.name)} ${conf.default_profile_id === k.id ? `<span class="status-pill done" style="font-size:10px;padding:1px 6px">По умолчанию</span>` : ""}</div>
+                    <div class="hint" style="font-size:11.5px">${esc(k.config?.aspect || "9:16")} · ${esc(k.config?.sub_font || "montserrat")}${k.config?.watermark?.enabled ? " · логотип" : ""}${k.config?.bgm?.enabled ? " · BGM" : ""}</div>
+                  </div>
+                  <div style="display:flex;gap:6px;flex:none">
+                    <button class="mini-chip" data-kit-default="${esc(k.id)}" type="button" title="Использовать по умолчанию для бота">По умолч.</button>
+                    <button class="mini-chip" data-kit-del="${esc(k.id)}" type="button" style="color:#fca5a5">Удалить</button>
+                  </div>
+                </div>
+              `).join("") : `<div class="hint">Профилей пока нет — создайте профиль ниже из текущих настроек нового проекта.</div>`}
+              <div style="display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--border)">
+                <input id="kitNewName" type="text" placeholder="Название Brand Kit (например: Подкаст-канал)" style="height:36px;padding:0 11px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:13px" />
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                  <select id="kitWmSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                    <option value="">Водяной знак: нет</option>
+                    ${ui.brandAssets.filter((a) => a.kind === "watermark").map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}
+                  </select>
+                  <select id="kitWmPos" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                    <option value="top-right">Угол: сверху справа</option>
+                    <option value="top-left">Угол: сверху слева</option>
+                    <option value="bottom-right">Угол: снизу справа</option>
+                    <option value="bottom-left">Угол: снизу слева</option>
+                  </select>
+                  <select id="kitIntroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                    <option value="">Интро: нет</option>
+                    ${ui.brandAssets.filter((a) => a.kind === "intro" || a.kind === "outro").map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${a.duration} с)</option>`).join("")}
+                  </select>
+                  <select id="kitOutroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                    <option value="">Аутро: нет</option>
+                    ${ui.brandAssets.filter((a) => a.kind === "outro" || a.kind === "intro").map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${a.duration} с)</option>`).join("")}
+                  </select>
+                </div>
+                <button class="btn-primary" id="kitCreateBtn" type="button" style="height:36px">Сохранить Brand Kit</button>
+              </div>
+            </div>
+
+            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:10px">
+              <b style="font-size:13px">Ассеты и фоновая музыка (BGM)</b>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="mini-chip" id="upWmBtn" type="button">+ Логотип (PNG/WebP)</button>
+                <button class="mini-chip" id="upIntroBtn" type="button">+ Интро (≤ 15 с)</button>
+                <button class="mini-chip" id="upOutroBtn" type="button">+ Аутро (≤ 15 с)</button>
+                <button class="mini-chip" id="upBgmBtn" type="button">+ Трек BGM</button>
+                <input id="upWmFile" type="file" accept=".png,.webp,image/png,image/webp" class="hidden" />
+                <input id="upIntroFile" type="file" accept=".mp4,.mov,.webm,video/*" class="hidden" />
+                <input id="upOutroFile" type="file" accept=".mp4,.mov,.webm,video/*" class="hidden" />
+                <input id="upBgmFile" type="file" accept=".mp3,.wav,.m4a,.ogg,.flac,audio/*" class="hidden" />
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;max-height:190px;overflow:auto">
+                ${ui.brandAssets.map((a) => `
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                    <span><b>[${esc(a.kind)}]</b> ${esc(a.name)} ${a.duration ? `· ${a.duration} с` : `${a.width}×${a.height}`}</span>
+                    <button class="mini-chip" data-del-asset="${esc(a.id)}" type="button" style="color:#fca5a5">Удалить</button>
+                  </div>
+                `).join("")}
+                ${ui.bgmTracks.map((t) => `
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-radius:7px;background:var(--surface);border:1px solid var(--border);font-size:12px">
+                    <span><b>[BGM]</b> ${esc(t.name)} · ${t.duration} с</span>
+                    <button class="mini-chip" data-del-bgm="${esc(t.id)}" type="button" style="color:#fca5a5">Удалить</button>
+                  </div>
+                `).join("")}
+                ${!ui.brandAssets.length && !ui.bgmTracks.length ? `<div class="hint">Ассеты и треки BGM ещё не загружены.</div>` : ""}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="studio-card settings-span-2">
+          <div class="card-title-row">
+            <h2>Telegram / Discord бот одобрения</h2>
+            <span class="status-pill ${(ui.botStatus?.telegram?.running || ui.botStatus?.discord?.running) ? "done" : ""}">${(ui.botStatus?.telegram?.running || ui.botStatus?.discord?.running) ? "Активен" : "Остановлен"}</span>
+          </div>
+          <div class="hint" style="margin-bottom:12px">Локальный исходящий клиент без проброса портов. Доступ строго по белому списку (пустой список блокирует всех пользователей).</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
+            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <label style="display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;cursor:pointer">
+                  <input type="checkbox" id="botTgOn" ${conf.tg_enabled ? "checked" : ""} /> Telegram Bot (Long Polling)
+                </label>
+                <span class="hint">${conf.tg_token_set ? "Токен сохранён" : "Токен не задан"}</span>
+              </div>
+              <div style="display:flex;gap:6px">
+                <input id="botTgToken" type="password" placeholder="${conf.tg_token_set ? "•••••••• (оставьте пустым, чтобы не менять)" : "Bot Token от @BotFather"}" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+                ${conf.tg_token_set ? `<button class="mini-chip" id="botTgClear" type="button">Очистить</button>` : ""}
+              </div>
+              <input id="botTgAllowed" type="text" value="${esc(conf.tg_allowed_users || "")}" placeholder="Разрешённые User ID или @username (через запятую)" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+              <input id="botTgChatId" type="text" value="${esc(conf.tg_chat_id || "")}" placeholder="Chat ID (необязательно — определится после /start)" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+              <div style="display:flex;gap:8px;margin-top:2px">
+                <button class="btn-ghost" id="botTgTest" type="button" style="height:32px;font-size:12px">Проверить Telegram</button>
+              </div>
+            </div>
+
+            <div style="padding:12px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <label style="display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;cursor:pointer">
+                  <input type="checkbox" id="botDcOn" ${conf.dc_enabled ? "checked" : ""} /> Discord Bot (Gateway v10)
+                </label>
+                <span class="hint">${conf.dc_token_set ? "Токен сохранён" : "Токен не задан"}</span>
+              </div>
+              <div style="display:flex;gap:6px">
+                <input id="botDcToken" type="password" placeholder="${conf.dc_token_set ? "•••••••• (оставьте пустым, чтобы не менять)" : "Discord Bot Token"}" style="flex:1;height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+                ${conf.dc_token_set ? `<button class="mini-chip" id="botDcClear" type="button">Очистить</button>` : ""}
+              </div>
+              <input id="botDcChannel" type="text" value="${esc(conf.dc_channel_id || "")}" placeholder="Channel ID для отправки превью" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+              <input id="botDcAllowed" type="text" value="${esc(conf.dc_allowed_users || "")}" placeholder="Разрешённые Discord User ID или @username" style="height:34px;padding:0 10px;border-radius:8px;background:var(--surface);border:1px solid var(--border);font-size:12.5px" />
+              <div style="display:flex;gap:8px;margin-top:2px">
+                <button class="btn-ghost" id="botDcTest" type="button" style="height:32px;font-size:12px">Проверить Discord</button>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:12px">
+            <button class="btn-primary" id="botSaveBtn" type="button">Сохранить настройки ботов</button>
           </div>
         </div>
       </div>
@@ -1219,6 +1566,149 @@
     if ((state.whisperData?.models || []).some((m) => m.downloading)) {
       startWhisperPoll();
     }
+
+    // Brand Kits & Assets bindings
+    $("#kitCreateBtn")?.addEventListener("click", async () => {
+      const name = ($("#kitNewName")?.value || "").trim();
+      if (!name) { toast("Введите название профиля", "err"); return; }
+      const cfg = currentOptsAsKitConfig();
+      const wmId = $("#kitWmSel")?.value || "";
+      cfg.watermark = wmId ? { enabled: true, asset_id: wmId, position: $("#kitWmPos")?.value || "top-right", scale: 0.16, opacity: 0.85, margin: 36 } : null;
+      cfg.intro_asset_id = $("#kitIntroSel")?.value || "";
+      cfg.outro_asset_id = $("#kitOutroSel")?.value || "";
+      try {
+        await api("/api/profiles", { method: "POST", body: JSON.stringify({ name, config: cfg }) });
+        toast(`Brand Kit «${name}» сохранён`);
+        await loadSettingsViewData();
+        renderNavView(true);
+      } catch (err) { toast(err.message, "err"); }
+    });
+    $$("[data-kit-default]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await api("/api/settings", { method: "POST", body: JSON.stringify({ default_profile_id: btn.dataset.kitDefault }) });
+          toast("Профиль по умолчанию обновлён");
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+      });
+    });
+    $$("[data-kit-del]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("Удалить этот Brand Kit?")) return;
+        try {
+          await api(`/api/profiles/${btn.dataset.kitDel}`, { method: "DELETE" });
+          toast("Brand Kit удалён");
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+      });
+    });
+
+    const bindAssetUpload = (btnId, inputId, kind) => {
+      $(btnId)?.addEventListener("click", () => $(inputId)?.click());
+      $(inputId)?.addEventListener("change", async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = "";
+        if (!file) return;
+        try {
+          const fd = new FormData();
+          fd.append("kind", kind);
+          fd.append("file", file);
+          const added = await api("/api/brand-assets", { method: "POST", body: fd });
+          toast(`Загружено: ${added.name}`);
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+      });
+    };
+    bindAssetUpload("#upWmBtn", "#upWmFile", "watermark");
+    bindAssetUpload("#upIntroBtn", "#upIntroFile", "intro");
+    bindAssetUpload("#upOutroBtn", "#upOutroFile", "outro");
+    $("#upBgmBtn")?.addEventListener("click", () => $("#upBgmFile")?.click());
+    $("#upBgmFile")?.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (!file) return;
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const added = await api("/api/bgm", { method: "POST", body: fd });
+        toast(`Трек BGM добавлен: ${added.name}`);
+        await loadSettingsViewData();
+        renderNavView(true);
+      } catch (err) { toast(err.message, "err"); }
+    });
+    $$("[data-del-asset]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await api(`/api/brand-assets/${btn.dataset.delAsset}`, { method: "DELETE" });
+          toast("Ассет удалён");
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+      });
+    });
+    $$("[data-del-bgm]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await api(`/api/bgm/${btn.dataset.delBgm}`, { method: "DELETE" });
+          toast("Трек BGM удалён");
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+      });
+    });
+
+    // Telegram & Discord Bot settings bindings
+    $("#botSaveBtn")?.addEventListener("click", async () => {
+      const body = {
+        tg_enabled: Boolean($("#botTgOn")?.checked),
+        tg_allowed_users: ($("#botTgAllowed")?.value || "").trim(),
+        tg_chat_id: ($("#botTgChatId")?.value || "").trim(),
+        dc_enabled: Boolean($("#botDcOn")?.checked),
+        dc_channel_id: ($("#botDcChannel")?.value || "").trim(),
+        dc_allowed_users: ($("#botDcAllowed")?.value || "").trim(),
+      };
+      const tgTok = ($("#botTgToken")?.value || "").trim();
+      const dcTok = ($("#botDcToken")?.value || "").trim();
+      if (tgTok) body.tg_token = tgTok;
+      if (dcTok) body.dc_token = dcTok;
+      try {
+        await api("/api/settings", { method: "POST", body: JSON.stringify(body) });
+        toast("Настройки ботов сохранены");
+        await loadSettingsViewData();
+        renderNavView(true);
+      } catch (err) { toast(err.message, "err"); }
+    });
+    $("#botTgClear")?.addEventListener("click", async () => {
+      try {
+        await api("/api/settings", { method: "POST", body: JSON.stringify({ clear_tg_token: true, tg_enabled: false }) });
+        toast("Токен Telegram очищен");
+        await loadSettingsViewData();
+        renderNavView(true);
+      } catch (err) { toast(err.message, "err"); }
+    });
+    $("#botDcClear")?.addEventListener("click", async () => {
+      try {
+        await api("/api/settings", { method: "POST", body: JSON.stringify({ clear_dc_token: true, dc_enabled: false }) });
+        toast("Токен Discord очищен");
+        await loadSettingsViewData();
+        renderNavView(true);
+      } catch (err) { toast(err.message, "err"); }
+    });
+    $("#botTgTest")?.addEventListener("click", async () => {
+      try {
+        const res = await api("/api/bots/test", { method: "POST", body: JSON.stringify({ platform: "telegram" }) });
+        toast(`Telegram подключён: @${res.username || "bot"}`);
+      } catch (err) { toast(err.message, "err"); }
+    });
+    $("#botDcTest")?.addEventListener("click", async () => {
+      try {
+        const res = await api("/api/bots/test", { method: "POST", body: JSON.stringify({ platform: "discord" }) });
+        toast(`Discord подключён: ${res.username || "bot"}`);
+      } catch (err) { toast(err.message, "err"); }
+    });
   }
 
   function startWhisperPoll() {
@@ -1252,7 +1742,7 @@
 
   function stopActivePoll() {
     if (ui.activePoll) {
-      clearInterval(ui.activePoll);
+      clearTimeout(ui.activePoll);
       ui.activePoll = null;
     }
   }
@@ -1265,9 +1755,9 @@
     }
     ui.activeSig = projectsSignature();
     if (ui.activePoll) return;
-    ui.activePoll = setInterval(async () => {
+    const tick = async () => {
+      ui.activePoll = null;
       if (state.current || (state.nav !== "queue" && state.nav !== "dashboard")) {
-        stopActivePoll();
         return;
       }
       try {
@@ -1277,9 +1767,12 @@
           ui.activeSig = sig;
           if (!state.current) renderNavView(true);
         }
-        if (!hasActiveProjects()) stopActivePoll();
       } catch (_) {}
-    }, 2500);
+      if (!state.current && (state.nav === "queue" || state.nav === "dashboard") && hasActiveProjects()) {
+        ui.activePoll = setTimeout(tick, 2500);
+      }
+    };
+    ui.activePoll = setTimeout(tick, 2500);
   }
 
   /* ---------------- Navigation & Boot ---------------- */
@@ -1295,6 +1788,8 @@
     renderSidebar();
     if (state.nav === "settings") {
       await loadSettingsViewData();
+    } else if (state.nav === "new") {
+      await loadProAssetsData();
     } else if (state.nav === "projects" || state.nav === "queue" || state.nav === "dashboard") {
       loadProjects().then(() => {
         if (!state.current) {
@@ -1361,6 +1856,7 @@
     renderNavView,
     renameProject,
     applyTheme,
+    clearNewUrl: () => { ui.newUrl = ""; },
     onSystem,
     onHealth,
     AI_PRESETS,

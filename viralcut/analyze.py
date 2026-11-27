@@ -377,10 +377,116 @@ def _nearest_quiet(curve: List[float], mean_db: float, t: float, hop: float,
     return best
 
 
+def _audio_bursts(curve: List[float], hop: float = 0.25,
+                  burst_db: float = 7.0) -> List[Dict[str, float]]:
+    """Резкие всплески громкости (> +7 дБ выше скользящей медианы) — крики, эмоции, хайп."""
+    if not curve or len(curve) < 8:
+        return []
+    half = max(4, int(round(15.0 / max(0.05, hop))))
+    hits: List[Tuple[float, float]] = []
+    n = len(curve)
+    for i, val in enumerate(curve):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        win = sorted(curve[lo:hi])
+        med = win[len(win) // 2]
+        delta = float(val) - float(med)
+        if delta >= burst_db and float(val) > -35.0:
+            hits.append((i * hop, delta))
+    if not hits:
+        return []
+    merged: List[Dict[str, float]] = []
+    for t, delta in hits:
+        if merged and t - merged[-1]["end"] <= 0.75:
+            merged[-1]["end"] = round(t + hop, 2)
+            merged[-1]["peak_db"] = round(max(merged[-1]["peak_db"], delta), 2)
+            merged[-1]["score"] = round(min(1.0, merged[-1]["peak_db"] / 14.0), 3)
+        else:
+            merged.append({
+                "start": round(t, 2),
+                "end": round(t + hop, 2),
+                "peak_db": round(delta, 2),
+                "score": round(min(1.0, delta / 14.0), 3),
+            })
+    return merged
+
+
+def extract_multimodal_peaks(duration: float, curve: List[float], hop: float = 0.25,
+                             reactions: Optional[Dict[str, List[Dict[str, float]]]] = None,
+                             scenes: Optional[List[float]] = None,
+                             chat_curve: Optional[Dict[str, Any]] = None,
+                             limit: int = 15) -> List[Dict[str, Any]]:
+    """Объединяет пики чата, звуковых всплесков, реакций и сцен в топ-15 точек для LLM."""
+    events: List[Dict[str, Any]] = []
+    if chat_curve and chat_curve.get("peaks"):
+        for p in chat_curve["peaks"]:
+            events.append({
+                "start": max(0.0, float(p["start"]) - 4.0),
+                "end": min(duration or float(p["end"]), float(p["end"])),
+                "score": min(1.0, float(p.get("zscore", 1.5)) / 5.0),
+                "reason": "chat spike",
+                "sample": str(p.get("sample_msg") or "")[:60],
+            })
+    for b in _audio_bursts(curve, hop):
+        events.append({
+            "start": b["start"],
+            "end": b["end"],
+            "score": float(b["score"]) * 0.85,
+            "reason": f"audio burst (+{b['peak_db']:.0f}dB)",
+            "sample": "",
+        })
+    if reactions:
+        for kind in ("laughter", "applause"):
+            for r in reactions.get(kind) or []:
+                events.append({
+                    "start": float(r["start"]),
+                    "end": float(r["end"]),
+                    "score": float(r.get("score", 0.6)) * 0.8,
+                    "reason": kind,
+                    "sample": "",
+                })
+    if scenes and len(scenes) >= 3:
+        # Плотные монтажные склейки (3+ за 10 сек) — динамичный экшн
+        for i in range(len(scenes) - 2):
+            if scenes[i + 2] - scenes[i] <= 10.0:
+                events.append({
+                    "start": scenes[i],
+                    "end": scenes[i + 2],
+                    "score": 0.55,
+                    "reason": "rapid cuts",
+                    "sample": "",
+                })
+    if not events:
+        return []
+    events.sort(key=lambda e: e["start"])
+    fused: List[Dict[str, Any]] = []
+    for ev in events:
+        if fused and ev["start"] <= fused[-1]["end"] + 6.0:
+            cur = fused[-1]
+            cur["end"] = round(max(cur["end"], ev["end"]), 1)
+            cur["score"] = round(min(1.0, max(cur["score"], ev["score"]) + 0.15), 3)
+            if ev["reason"] not in cur["reasons"]:
+                cur["reasons"].append(ev["reason"])
+            if not cur["sample"] and ev["sample"]:
+                cur["sample"] = ev["sample"]
+        else:
+            fused.append({
+                "start": round(ev["start"], 1),
+                "end": round(max(ev["end"], ev["start"] + 3.0), 1),
+                "score": round(ev["score"], 3),
+                "reasons": [ev["reason"]],
+                "sample": ev["sample"],
+            })
+    fused.sort(key=lambda x: x["score"], reverse=True)
+    return fused[:limit]
+
+
 def _score_window(sents: List[Dict[str, Any]], media_duration: float,
                   curve: List[float], mean_db: float, hop: float,
                   reactions: Optional[Dict[str, List[Dict[str, float]]]] = None,
-                  scenes: Optional[List[float]] = None
+                  scenes: Optional[List[float]] = None,
+                  chat_curve: Optional[Dict[str, Any]] = None,
+                  bursts: Optional[List[Dict[str, float]]] = None,
                   ) -> Tuple[float, Dict[str, float]]:
     text = " ".join(s["text"] for s in sents)
     words = [w for s in sents for w in s["words"]]
@@ -456,14 +562,18 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
         or re.search(r"\b(подпис\w*|коммент\w*|сохран\w*|попроб\w*|сделай\w*|subscribe\w*|comment\w*|save|try|share|follow\w*)\b", tail)
     ) else 0.45
 
-    # 8. Реакция аудитории: смех и аплодисменты — сильнейший сигнал «это
-    # стоит смотреть», но по тексту его не видно, поэтому считаем по звуку.
+    # 8. Реакция аудитории + звуковые всплески (крик/эмоция > +7 дБ выше медианы)
     window_start, window_end = sents[0]["start"], sents[-1]["end"]
     reaction = 0.0
     if reactions:
         laughter = _overlap_seconds(window_start, window_end, reactions.get("laughter") or [])
         applause = _overlap_seconds(window_start, window_end, reactions.get("applause") or [])
         reaction = min(1.0, (laughter * 1.0 + applause * 0.6) / max(2.0, dur * 0.15))
+    excitement = 0.0
+    if bursts:
+        burst_sec = _overlap_seconds(window_start, window_end, bursts)
+        excitement = min(1.0, burst_sec / max(1.0, dur * 0.08))
+        reaction = max(reaction, excitement * 0.85)
 
     # 9. Сцена: клип, который начинается с монтажной склейки, выглядит цельно;
     # частая смена сцен внутри окна — признак динамичного фрагмента.
@@ -474,7 +584,15 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
         density = min(1.0, len(inside) / max(1.0, dur / 12.0))
         visual = 0.6 * (1.0 if starts_on_cut else 0.0) + 0.4 * density
 
-    score = (
+    # 10. Повтор чата (YouTube/Twitch VOD): учитываем только если есть реальные данные чата
+    chat_score = 0.0
+    has_chat = bool(chat_curve and chat_curve.get("curve") and int(chat_curve.get("total_messages") or 0) > 0)
+    if has_chat:
+        from . import chat_replay
+
+        chat_score = chat_replay.window_score(chat_curve, window_start, window_end, lag_sec=4.0)
+
+    base_score = (
         0.28 * hook
         + 0.18 * retention
         + 0.16 * emotion
@@ -485,11 +603,13 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
         + 0.07 * reaction
         + 0.04 * visual
     )
+    score = (0.84 * base_score + 0.16 * chat_score) if has_chat else base_score
     parts = {
         "hook": round(hook, 3), "retention": round(retention, 3), "emotion": round(emotion, 3),
         "specificity": round(specificity, 3), "completeness": round(completeness, 3),
         "length_fit": round(length_fit, 3), "payoff": round(payoff, 3),
-        "reaction": round(reaction, 3), "visual": round(visual, 3),
+        "reaction": round(reaction, 3), "excitement": round(excitement, 3),
+        "visual": round(visual, 3), "chat": round(chat_score, 3),
     }
     return round(min(1.0, max(0.0, score)), 4), parts
 
@@ -559,13 +679,15 @@ def _make_caption(title: str, text: str, platform: str) -> str:
 def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                   count: int = 10, min_dur: float = 15, max_dur: float = 60,
                   target_dur: float = 32, platform: str = "shorts", *,
-                  audio_track: Optional[int] = None) -> List[Dict[str, Any]]:
+                  audio_track: Optional[int] = None,
+                  chat_curve: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Возвращает список клипов: тайминги, score, заголовок, объяснение."""
     sents = build_sentences(segments)
     if not sents:
         return []
     curve, mean_db = cached_energy_curve(media, audio_track=audio_track)
     hop = 0.25
+    bursts = _audio_bursts(curve, hop)
     ad_blocks = detect_ads(sents)
     # Смех/аплодисменты и смены сцен — необязательные сигналы: без numpy,
     # OpenCV или звука поиск моментов продолжает работать по тексту и громкости.
@@ -603,7 +725,7 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                     # окно в основном про спонсора — в клипы не берём
                     break
                 score, parts = _score_window(window, duration, curve, mean_db, hop,
-                                             reactions, scenes)
+                                             reactions, scenes, chat_curve=chat_curve, bursts=bursts)
                 hook = _hook_bonus(window[0]["text"])
                 if hook:
                     boost = min(0.25, hook * 0.05)
@@ -626,7 +748,7 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         if end - start >= 3:
             chunk = sents
             score, parts = _score_window(chunk, duration, curve, mean_db, hop,
-                                         reactions, scenes)
+                                         reactions, scenes, chat_curve=chat_curve, bursts=bursts)
             candidates.append({
                 "start": round(start, 3), "end": round(end, 3), "duration": round(end - start, 2),
                 "score": score, "parts": parts,

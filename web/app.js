@@ -254,6 +254,8 @@ const state = {
     dur: "20-45",
     aspect: "9:16",
     mode: "auto",
+    cutMode: "ai",
+    aiPreset: "best",
     subtitles: true,
     accent: "yellow",
     subFont: "montserrat",
@@ -261,12 +263,22 @@ const state = {
     subPos: "bottom",
     subOffset: 0,
     subSpeed: "calm",
+    subAnim: "pop",
+    subOutline: true,
+    subOutlineWidth: 7,
+    subOutlineColor: "#000000",
+    language: "auto",
     cutPauses: false,
     cookies: "",
     aiMode: false,
     aiPrompt: "",
     fontTarget: "#fontSelect"
   },
+  nav: "dashboard",
+  sysData: null,
+  settingsData: null,
+  whisperData: null,
+  gameClips: [],
   ai: null
 };
 
@@ -318,15 +330,32 @@ function toast(text, kind) {
 
 function renderSidebar() {
   const list = $("#projectList");
+  const totalBadge = $("#navProjectsCount");
+  const queueBadge = $("#navQueueCount");
+  const activeCount = state.projects.filter((p) => ["queued", "running", "preparing", "processing"].includes(p.status)).length;
+  if (totalBadge) {
+    totalBadge.textContent = String(state.projects.length);
+    totalBadge.hidden = !state.projects.length;
+  }
+  if (queueBadge) {
+    queueBadge.textContent = String(activeCount);
+    queueBadge.hidden = !activeCount;
+  }
+  $$(".nav-item[data-nav]").forEach((btn) => {
+    const key = btn.dataset.nav;
+    const isActive = !state.current ? state.nav === key : key === "projects";
+    btn.classList.toggle("active", isActive);
+  });
+  if (!list) return;
   if (!state.projects.length) {
-    list.innerHTML = '<div class="hint" style="padding:8px 10px">Пока пусто. Добавьте первую ссылку.</div>';
+    list.innerHTML = '<div class="hint" style="padding:8px 10px">Пока пусто. Создайте первый проект.</div>';
     return;
   }
-  list.innerHTML = state.projects.map((p) => {
+  list.innerHTML = state.projects.slice(0, 8).map((p) => {
     const when = new Date((p.created_at || 0) * 1000).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
-    const count = Number(p.meta?.clips || 0);
+    const count = Number(p.clips_count ?? p.meta?.clips ?? 0);
     const clipsLabel = count > 0 ? `${count} ${plural(count, "клип", "клипа", "клипов")} · ` : "";
-    const sub = p.status === "done" ? `${clipsLabel}${when}` : p.status === "error" ? "ошибка" : p.status === "running" ? "обработка…" : when;
+    const sub = p.status === "done" ? `${clipsLabel}${when}` : p.status === "error" ? "ошибка" : ["queued", "running", "preparing", "processing"].includes(p.status) ? "в работе…" : when;
     return `<button class="project-item ${state.current === p.id ? "active" : ""}" data-project="${p.id}">
       <span class="project-item-icon">${p.meta?.live ? ICONS.play : OPT_ICONS.frame}<span class="status-dot ${esc(p.status)}"></span></span>
       <span class="project-item-text">
@@ -641,6 +670,8 @@ function heroOptions() {
     target_dur: d.target,
     aspect: state.opts.aspect,
     mode: state.opts.mode,
+    cut_mode: state.opts.cutMode || "ai",
+    ai_preset: state.opts.aiPreset || "best",
     subtitles: state.opts.subtitles,
     accent: state.opts.accent,
     sub_font: state.opts.subFont,
@@ -648,12 +679,16 @@ function heroOptions() {
     sub_position: state.opts.subPos,
     sub_offset: state.opts.subOffset,
     sub_speed: state.opts.subSpeed,
+    sub_anim: state.opts.subAnim || "pop",
+    sub_outline: state.opts.subOutline !== false,
+    sub_outline_width: Number(state.opts.subOutlineWidth ?? 7),
+    sub_outline_color: state.opts.subOutlineColor || "#000000",
     cut_pauses: state.opts.cutPauses,
     language: state.opts.language || "auto",
     cookies_browser: state.opts.cookies,
     ai_mode: Boolean(state.opts.aiMode),
     ai_prompt: state.opts.aiPrompt || "",
-    autostart: Boolean(state.opts.aiMode)
+    autostart: Boolean(state.opts.aiMode || state.opts.cutMode === "even")
   };
 }
 
@@ -1298,11 +1333,12 @@ function resultsHTML() {
     </div>
     <div class="project-actions">
       ${ready.length ? `<a class="btn-primary" href="/api/projects/${project.id}/zip" data-download-zip="${project.id}" style="display:inline-flex;align-items:center;gap:7px">${ICONS.zip} Скачать всё</a>` : ""}
+      <button class="btn-ghost" data-action="rename-project" title="Переименовать проект">Переименовать</button>
       <button class="btn-ghost" data-action="folder" title="Открыть папку с готовыми MP4">${ICONS.folder} Открыть папку</button>
       ${ready.length ? `<button class="btn-ghost" data-action="ai-advice" title="Подсказки по хуку, таймингу и субтитрам">${ICONS.spark} Совет ИИ</button>` : ""}
       ${canSmartAll ? `<button class="btn-ghost" data-action="smart-all">Пересобрать в умный кроп</button>` : ""}
       <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
-      <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
+      <button class="btn-ghost" data-action="home">${ICONS.back} Проекты</button>
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
     </div>
   </div>
@@ -1313,13 +1349,17 @@ function resultsHTML() {
 
 function renderMain(force) {
   const main = $("#main");
-  $("#newBtn").classList.toggle("active", !state.current && state.homeView !== "streams");
-  $("#streamBtn").classList.toggle("active", !state.current && state.homeView === "streams");
+  $("#newBtn")?.classList.toggle("active", !state.current && state.homeView !== "streams");
+  $("#streamBtn")?.classList.toggle("active", !state.current && state.homeView === "streams");
   if (!state.current || !state.detail) {
     if (!state.current) {
-      main.innerHTML = heroHTML();
-      bindHero();
-      state.mainKey = "hero";
+      if (window.KRLZ2 && typeof window.KRLZ2.renderNavView === "function") {
+        window.KRLZ2.renderNavView(force);
+      } else {
+        main.innerHTML = heroHTML();
+        bindHero();
+        state.mainKey = "hero";
+      }
     }
     return;
   }
@@ -1417,7 +1457,19 @@ $("#main").addEventListener("click", async (e) => {
   if (!actionEl) return;
   const action = actionEl.dataset.action;
 
+  if (action === "rename-project") {
+    if (!state.detail) return;
+    if (window.KRLZ2 && typeof window.KRLZ2.renameProject === "function") {
+      window.KRLZ2.renameProject(state.detail.project);
+    }
+    return;
+  }
+
   if (action === "home") {
+    if (window.KRLZ2 && typeof window.KRLZ2.navigate === "function") {
+      window.KRLZ2.navigate("projects");
+      return;
+    }
     state.current = null;
     state.detail = null;
     state.mainKey = "";
@@ -2388,7 +2440,7 @@ document.addEventListener("keydown", (e) => {
 
 /* ---------------- Boot ---------------- */
 
-$("#newBtn").addEventListener("click", () => {
+$("#newBtn")?.addEventListener("click", () => {
   state.current = null;
   state.detail = null;
   state.mainKey = "";
@@ -2455,18 +2507,27 @@ async function checkHealth() {
   try {
     const h = await api("/api/health");
     state.health = h;
+    const verEl = $("#appVersion");
+    if (verEl) verEl.textContent = h.version || "2.0.0";
     const el = $("#health");
-    $("#appVersion").textContent = h.version || "";
-    el.classList.toggle("ok", !!h.ok);
-    el.classList.toggle("bad", !h.ok);
-    $("#healthText").textContent = h.ok
-      ? (h.model === false
-          ? "Готов · модель скачается при первом видео"
-          : `Движок готов · ffmpeg${h.whisper ? " · Whisper" : " · без Whisper"}`)
-      : "ffmpeg не найден";
+    if (el) {
+      el.classList.toggle("ok", !!h.ok);
+      el.classList.toggle("bad", !h.ok);
+    }
+    const ht = $("#healthText");
+    if (ht) {
+      ht.textContent = h.ok
+        ? (h.model === false
+            ? "Готов · модель скачается при первом видео"
+            : `Движок готов · ffmpeg${h.whisper ? " · Whisper" : " · без Whisper"}`)
+        : "ffmpeg не найден";
+    }
+    window.KRLZ2?.onHealth?.(h);
   } catch (_) {
-    $("#health").classList.add("bad");
-    $("#healthText").textContent = "Сервер недоступен";
+    $("#health")?.classList.add("bad");
+    const ht = $("#healthText");
+    if (ht) ht.textContent = "Сервер недоступен";
+    window.KRLZ2?.onHealth?.({ ok: false });
   }
 }
 
@@ -2524,13 +2585,15 @@ const fmtGb = (mb) => (mb / 1024).toFixed(1).replace(".", ",");
 
 function renderSystem(data) {
   if (!data) return;
+  state.sysData = data;
+  window.KRLZ2?.onSystem?.(data);
   const fallback = data.app?.encoder_fallback;
   if (fallback && fallback.id !== state.encoderFallbackId) {
     state.encoderFallbackId = fallback.id;
     const reason = fallback.reason === "gpu_unavailable"
       ? "Аппаратный кодировщик недоступен."
       : "Кодирование на видеокарте не удалось.";
-    toast(`${reason} ViralCut продолжает на процессоре.`, "err");
+    toast(`${reason} KrlzCut продолжает на процессоре.`, "err");
   }
   if (data.disabled) {
     const card = $("#sysCard");
@@ -3742,6 +3805,7 @@ async function withRetry(fn, tries = 4, delay = 500) {
   }, 12000);
 
   try { bindUpdateCard(); } catch (e) { console.error(e); }
+  try { window.KRLZ2?.init?.(); } catch (e) { console.error(e); }
   try { $("#settingsBtn")?.addEventListener("click", openSettings); } catch (e) { console.error(e); }
   try {
     $("#helpBtn")?.addEventListener("click", () => (ASSISTANT.open ? closeAssistant() : openAssistant()));

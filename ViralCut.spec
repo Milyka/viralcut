@@ -153,7 +153,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ViralCut",
+    name="KrlzCut",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -171,25 +171,25 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="ViralCut",
+    name="KrlzCut",
 )
 
 if IS_MAC:
     app = BUNDLE(
         coll,
-        name="ViralCut.app",
+        name="KrlzCut.app",
         icon="assets/ViralCut.icns",
-        bundle_identifier="com.viralcut.app",
+        bundle_identifier="com.krlzcut.app",
         version=_APP_VERSION,
         info_plist={
-            "CFBundleDisplayName": "ViralCut",
+            "CFBundleDisplayName": "KrlzCut",
             "CFBundleShortVersionString": _APP_VERSION,
             "CFBundleVersion": _APP_VERSION,
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,
             "LSApplicationCategoryType": "public.app-category.video",
-            "NSHumanReadableCopyright": "ViralCut",
+            "NSHumanReadableCopyright": "KrlzCut",
             # Intel-сборка по умолчанию считается на дискретной карте:
             # без этого macOS выбирает встроенную (и меняет её на ходу).
             **({"NSSupportsAutomaticGraphicsSwitching": False}

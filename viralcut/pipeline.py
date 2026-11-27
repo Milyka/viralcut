@@ -25,8 +25,20 @@ ALLOWED_MEDIA_SUFFIXES = {
 STYLE_KEYS = (
     "aspect", "mode", "subtitles", "accent", "uppercase", "show_hook",
     "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free",
-    "sub_speed", "cut_pauses",
+    "sub_speed", "sub_anim", "sub_outline", "sub_outline_width",
+    "sub_outline_color", "cut_pauses", "game_layer",
 )
+
+AI_PRESET_PROMPTS: Dict[str, str] = {
+    "best": "",
+    "funny": "Ищи самые смешные, ироничные, неожиданные шутки, смех и забавные реакции.",
+    "emotions": "Ищи самые эмоциональные, искренние и заряженные моменты с сильной подачей.",
+    "drama": "Ищи споры, напряжение, конфликты, неожиданные повороты и острые заявления.",
+    "insights": "Ищи главные инсайты, практические советы, цифры, разборы и ценные выводы.",
+    "action": "Ищи самые динамичные, пиковые события, экшн, резкие смены сцен и громкие моменты.",
+    "quotes": "Ищи ёмкие, запоминающиеся цитаты и сильные законченные мысли, которые хочется переслать.",
+    "story": "Ищи цельные мини-истории с завязкой, развитием и яркой концовкой.",
+}
 
 DEFAULT_OPTIONS: Dict[str, Any] = {
     "count": 10,
@@ -36,6 +48,8 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "language": "auto",
     "aspect": "9:16",
     "mode": "auto",
+    "cut_mode": "ai",           # ai | even | stream
+    "ai_preset": "best",        # best | funny | emotions | drama | insights | action | quotes | story
     "subtitles": True,
     "accent": "yellow",
     "uppercase": True,
@@ -46,6 +60,11 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "sub_position": "bottom",
     "sub_offset": 0,
     "sub_speed": "calm",
+    "sub_anim": "pop",
+    "sub_outline": True,
+    "sub_outline_width": 7,
+    "sub_outline_color": "#000000",
+    "game_layer": None,
     "max_height": 1080,
     "exact_quality": False,
     "segments": False,
@@ -82,8 +101,24 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         opts["aspect"] = "9:16"
     if opts["mode"] not in ("auto", "blur", "crop"):
         opts["mode"] = "auto"
-    if opts["accent"] not in subtitles.ACCENTS:
+    if opts.get("cut_mode") not in ("ai", "even", "stream"):
+        opts["cut_mode"] = "ai"
+    if opts.get("ai_preset") not in AI_PRESET_PROMPTS:
+        opts["ai_preset"] = "best"
+    if not subtitles.is_valid_color(str(opts.get("accent") or "")):
         opts["accent"] = "yellow"
+    if opts.get("sub_anim") not in subtitles.ANIMATIONS:
+        opts["sub_anim"] = "pop"
+    opts["sub_outline"] = bool(opts.get("sub_outline", True))
+    try:
+        opts["sub_outline_width"] = max(0, min(14, int(opts.get("sub_outline_width", 7))))
+    except Exception:
+        opts["sub_outline_width"] = 7
+    ocol = str(opts.get("sub_outline_color") or "#000000").strip()
+    opts["sub_outline_color"] = ocol if subtitles.is_valid_color(ocol) else "#000000"
+    from . import game_layer as _gl
+
+    opts["game_layer"] = _gl.normalize_config(opts.get("game_layer"))
     try:
         size = int(opts.get("sub_size", 118))
         if size < 70:
@@ -332,8 +367,62 @@ def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         "show_hook": opts["show_hook"], "focus_x": 0.5, "sub_size": opts["sub_size"],
         "sub_font": opts["sub_font"], "sub_position": opts["sub_position"],
         "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"), "sub_speed": opts["sub_speed"],
+        "sub_anim": opts.get("sub_anim", "pop"),
+        "sub_outline": bool(opts.get("sub_outline", True)),
+        "sub_outline_width": int(opts.get("sub_outline_width", 7)),
+        "sub_outline_color": opts.get("sub_outline_color", "#000000"),
+        "game_layer": opts.get("game_layer"),
         "segments": bool(opts.get("segments")), "cut_pauses": bool(opts.get("cut_pauses")),
     }
+
+
+def _even_segments(duration: float, target_dur: float, count: int) -> List[Dict[str, Any]]:
+    """Обычная нарезка: равные фрагменты по времени через FFmpeg без анализа речи."""
+    step = max(8.0, float(target_dur or 30.0))
+    total_possible = max(1, int(duration // step) + (1 if (duration % step) >= 8.0 else 0))
+    limit = total_possible if count <= 0 else min(total_possible, count)
+    out: List[Dict[str, Any]] = []
+    for i in range(limit):
+        s = round(i * step, 2)
+        e = round(min(duration, s + step), 2)
+        if e - s < 5.0:
+            break
+        m1, s1 = divmod(int(s), 60)
+        m2, s2 = divmod(int(e), 60)
+        out.append({
+            "start": s,
+            "end": e,
+            "score": 0.85,
+            "title": f"Фрагмент {i + 1} ({m1:02d}:{s1:02d}–{m2:02d}:{s2:02d})",
+            "hook": "",
+            "caption": f"Часть {i + 1}\n\n#shorts #reels #tiktok #clips",
+            "words": [],
+            "parts": {},
+        })
+    return out
+
+
+def _apply_preset_boost(found: List[Dict[str, Any]], preset: str) -> List[Dict[str, Any]]:
+    """Переранжирует найденные моменты с учётом выбранного пресета ИИ-нарезки."""
+    if not found or preset in ("", "best"):
+        return found
+    weights = {
+        "funny": ("reaction", "emotion"),
+        "emotions": ("emotion", "reaction"),
+        "drama": ("emotion", "hook"),
+        "insights": ("specificity", "completeness"),
+        "action": ("visual", "retention"),
+        "quotes": ("completeness", "hook"),
+        "story": ("completeness", "retention"),
+    }.get(preset)
+    if not weights:
+        return found
+    for item in found:
+        parts = item.get("parts") or {}
+        boost = sum(float(parts.get(k) or 0.0) for k in weights) * 0.12
+        item["score"] = round(min(1.0, float(item.get("score") or 0.0) + boost), 4)
+    found.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    return found
 
 
 def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
@@ -560,107 +649,106 @@ def process_project(pid: str) -> None:
     opts["audio_track"] = audio_track
 
     try:
-        progress(0.05, "Распознавание речи")
-        transcript: Optional[Dict[str, Any]] = None
-        if not transcribe.model_cached():
-            progress(0.05, "Скачиваю модель распознавания речи (~460 МБ, один раз)")
-        stop_hb, hb_thread = _heartbeat(pid, "Распознавание речи")
-        try:
-            transcript = transcribe.transcribe(
-                source, workdir, language=opts.get("language") or None,
-                on_progress=lambda p, s: progress(0.05 + p * 0.45, f"{s} {int(p*100)}%"),
-                audio_track=audio_track,
-            )
-            stop_hb.set(); hb_thread.join(timeout=1)
-        except Cancelled:
-            stop_hb.set(); hb_thread.join(timeout=1)
-            raise
-        except Exception as exc:  # noqa: BLE001
-            stop_hb.set(); hb_thread.join(timeout=1)
-            if info["audio_tracks"] > 1:
-                # У субтитров площадки нет привязки к выбранной звуковой дорожке.
-                raise RuntimeError("Не удалось распознать выбранную аудиодорожку. " + str(exc)[:300]) from exc
-            wanted = (opts.get("language") or "").lower()
-            if project["url"].startswith(("https://", "http://")):
-                # При language="auto" (wanted == "") пробуем основные языки (ru, en)
-                # с проверкой алфавита, чтобы не подхватить автоперевод на чужой язык.
-                fallback_langs = [wanted] if wanted else ["ru", "en"]
-                for lang_code in fallback_langs:
-                    sub_path = downloader.fetch_subtitles(
-                        project["url"], workdir, browser=opts.get("cookies_browser") or None,
-                        language=lang_code,
-                    )
-                    if sub_path:
-                        segs = utils.parse_vtt(Path(sub_path))
-                        if segs and not transcribe.subtitle_script_mismatch(segs, lang_code):
-                            transcript = {"language": lang_code, "duration": duration, "segments": segs,
-                                          "engine": "source-subtitles"}
-                            break
-            if transcript is None:
-                hint = " Проверьте аудиодорожку или выберите язык речи вручную." if not wanted else ""
-                raise RuntimeError("Не удалось распознать речь. " + str(exc)[:300] + hint) from exc
-
-        try:
-            (workdir / "transcript.json").write_text(
-                json.dumps(transcript.get("segments") or [], ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
-        _update(pid, language=transcript.get("language"))
-        db.merge_meta(pid, {
-            "engine": transcript.get("engine"),
-            "segments": len(transcript.get("segments") or []),
-        })
-
         found: List[Dict[str, Any]] = []
-        if opts.get("ai_mode"):
-            progress(0.55, "ИИ выбирает вирусные моменты")
+        if opts.get("cut_mode") == "even":
+            progress(0.25, "Равномерная нарезка FFmpeg (без анализа речи)")
+            found = _even_segments(duration, opts["target_dur"], opts["count"])
+            db.merge_meta(pid, {"engine": "ffmpeg-even", "segments": len(found)})
+        else:
+            progress(0.05, "Распознавание речи")
+            transcript: Optional[Dict[str, Any]] = None
+            if not transcribe.model_cached():
+                progress(0.05, "Скачиваю модель распознавания речи (один раз)")
+            stop_hb, hb_thread = _heartbeat(pid, "Распознавание речи")
             try:
-                from . import ai as ai_module
-
-                if not ai_module.configured():
-                    raise ai_module.AIError(
-                        "Не настроен ключ ИИ — включите его в настройках или выключите ИИ-режим.")
-                plan = ai_module.plan_clips(
-                    transcript["segments"], duration,
-                    options={"count": opts["count"], "min_dur": opts["min_dur"],
-                             "max_dur": opts["max_dur"]},
-                    instruction=opts.get("ai_prompt") or "",
+                transcript = transcribe.transcribe(
+                    source, workdir, language=opts.get("language") or None,
+                    on_progress=lambda p, s: progress(0.05 + p * 0.45, f"{s} {int(p*100)}%"),
+                    audio_track=audio_track,
                 )
-                found = _ai_found(plan["clips"], transcript["segments"])
-                db.merge_meta(pid, {"ai_model": plan.get("model"),
-                                    "ai_took": plan.get("took"),
-                                    "ai_clips": len(found),
-                                    "ai_instruction": plan.get("instruction") or ""})
-                print(f"[ai] моментов от модели: {len(found)} ({plan.get('model')})",
-                      file=sys.stderr, flush=True)
-            except Exception as exc:  # noqa: BLE001 — ИИ не должен ломать нарезку
-                traceback.print_exc()
-                db.merge_meta(pid, {"ai_error": str(exc)[:300]})
-                print(f"[ai] план не получен: {str(exc)[:200]} — беру эвристику",
-                      file=sys.stderr, flush=True)
-                found = []
-        if not found:
-            progress(0.55, "Поиск вирусных моментов")
-            found = analyze.find_segments(
-                transcript["segments"], source, duration,
-                count=opts["count"] or 0,
-                min_dur=opts["min_dur"], max_dur=opts["max_dur"],
-                target_dur=opts["target_dur"],
-                audio_track=audio_track,
-            )
+                stop_hb.set(); hb_thread.join(timeout=1)
+            except Cancelled:
+                stop_hb.set(); hb_thread.join(timeout=1)
+                raise
+            except Exception as exc:  # noqa: BLE001
+                stop_hb.set(); hb_thread.join(timeout=1)
+                if info["audio_tracks"] > 1:
+                    # У субтитров площадки нет привязки к выбранной звуковой дорожке.
+                    raise RuntimeError("Не удалось распознать выбранную аудиодорожку. " + str(exc)[:300]) from exc
+                wanted = (opts.get("language") or "").lower()
+                if project["url"].startswith(("https://", "http://")):
+                    fallback_langs = [wanted] if wanted else ["ru", "en"]
+                    for lang_code in fallback_langs:
+                        sub_path = downloader.fetch_subtitles(
+                            project["url"], workdir, browser=opts.get("cookies_browser") or None,
+                            language=lang_code,
+                        )
+                        if sub_path:
+                            segs = utils.parse_vtt(Path(sub_path))
+                            if segs and not transcribe.subtitle_script_mismatch(segs, lang_code):
+                                transcript = {"language": lang_code, "duration": duration, "segments": segs,
+                                              "engine": "source-subtitles"}
+                                break
+                if transcript is None:
+                    hint = " Проверьте аудиодорожку или выберите язык речи вручную." if not wanted else ""
+                    raise RuntimeError("Не удалось распознать речь. " + str(exc)[:300] + hint) from exc
+
+            try:
+                (workdir / "transcript.json").write_text(
+                    json.dumps(transcript.get("segments") or [], ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            _update(pid, language=transcript.get("language"))
+            db.merge_meta(pid, {
+                "engine": transcript.get("engine"),
+                "segments": len(transcript.get("segments") or []),
+            })
+
+            preset_hint = AI_PRESET_PROMPTS.get(str(opts.get("ai_preset") or "best"), "")
+            full_instruction = " ".join(x for x in (preset_hint, opts.get("ai_prompt") or "") if x).strip()
+            if opts.get("ai_mode"):
+                progress(0.55, "ИИ выбирает вирусные моменты")
+                try:
+                    from . import ai as ai_module
+
+                    if not ai_module.configured():
+                        raise ai_module.AIError(
+                            "Не настроен ключ ИИ — включите его в настройках или выключите ИИ-режим.")
+                    plan = ai_module.plan_clips(
+                        transcript["segments"], duration,
+                        options={"count": opts["count"], "min_dur": opts["min_dur"],
+                                 "max_dur": opts["max_dur"]},
+                        instruction=full_instruction,
+                    )
+                    found = _ai_found(plan["clips"], transcript["segments"])
+                    db.merge_meta(pid, {"ai_model": plan.get("model"),
+                                        "ai_took": plan.get("took"),
+                                        "ai_clips": len(found),
+                                        "ai_instruction": plan.get("instruction") or ""})
+                    print(f"[ai] моментов от модели: {len(found)} ({plan.get('model')})",
+                          file=sys.stderr, flush=True)
+                except Exception as exc:  # noqa: BLE001 — ИИ не должен ломать нарезку
+                    traceback.print_exc()
+                    db.merge_meta(pid, {"ai_error": str(exc)[:300]})
+                    print(f"[ai] план не получен: {str(exc)[:200]} — беру эвристику",
+                          file=sys.stderr, flush=True)
+                    found = []
+            if not found:
+                progress(0.55, "Поиск вирусных моментов")
+                found = analyze.find_segments(
+                    transcript["segments"], source, duration,
+                    count=opts["count"] or 0,
+                    min_dur=opts["min_dur"], max_dur=opts["max_dur"],
+                    target_dur=opts["target_dur"],
+                    audio_track=audio_track,
+                )
+                found = _apply_preset_boost(found, str(opts.get("ai_preset") or "best"))
         if not found:
             raise RuntimeError("Не нашлось связных фрагментов. Попробуйте увеличить длину клипа.")
 
-        clip_settings = {
-            "aspect": opts["aspect"], "mode": opts["mode"], "subtitles": opts["subtitles"],
-            "accent": opts["accent"], "uppercase": opts["uppercase"],
-            "show_hook": opts["show_hook"], "focus_x": 0.5, "sub_size": opts["sub_size"],
-            "sub_font": opts["sub_font"], "sub_position": opts["sub_position"],
-            "sub_offset": opts["sub_offset"], "sub_free": opts.get("sub_free"),
-            "sub_speed": opts["sub_speed"], "cut_pauses": bool(opts.get("cut_pauses")),
-        }
+        clip_settings = _clip_settings(opts)
         _check_cancel(pid)
         total = len(found)
         clip_word = "клипа" if (total % 10 == 1 and total % 100 != 11) else "клипов"
@@ -906,6 +994,10 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 free_pos=settings.get("sub_free"),
                 speed=settings.get("sub_speed", "calm"),
                 aspect=settings.get("aspect", "9:16"),
+                animation=settings.get("sub_anim", "pop"),
+                outline_enabled=bool(settings.get("sub_outline", True)),
+                outline_width=int(settings.get("sub_outline_width", 7)),
+                outline_color=str(settings.get("sub_outline_color") or "#000000"),
             )
             ass_path = staged / f"{clip['id']}.ass"
             ass_path.write_text(text, encoding="utf-8")
@@ -917,6 +1009,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
             focus_x=float(settings.get("focus_x", 0.5)), on_progress=on_progress,
             crop_path=crop_path, pip=pip_options(opts or {}),
             audio_track=audio_track, spans=spans or None,
+            game_layer=settings.get("game_layer"),
         )
 
         thumb = preview = None
@@ -971,9 +1064,17 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     if settings.get("segments"):
         raise RuntimeError("Клип собран в экономном режиме из фрагмента. Шаблон меняется до запуска нарезки.")
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
-                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free", "sub_speed", "cut_pauses"):
+                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free", "sub_speed",
+                "sub_anim", "sub_outline", "sub_outline_width", "sub_outline_color",
+                "cut_pauses", "game_layer"):
         if key in payload and payload[key] is not None:
             settings[key] = payload[key]
+    if "game_layer" in payload and payload["game_layer"] is None:
+        settings["game_layer"] = None
+    elif "game_layer" in payload and isinstance(payload["game_layer"], dict):
+        from . import game_layer as _gl
+
+        settings["game_layer"] = _gl.normalize_config(payload["game_layer"])
     if "sub_free" in payload and payload["sub_free"] is None:
         settings["sub_free"] = None
     elif "sub_position" in payload and "sub_free" not in payload:
@@ -1234,6 +1335,38 @@ def detect_project_pip(pid: str) -> Dict[str, Any]:
 
 
 # --- удаление клипа и массовое применение стиля (улучшение 6) ----------------
+
+def generate_clip_caption(cid: str) -> Dict[str, Any]:
+    """Генерирует цепляющее описание и хэштеги для клипа (через ИИ или локально)."""
+    clip = db.get_clip(cid)
+    if not clip:
+        raise KeyError("Клип не найден")
+    text = " ".join(str(w.get("word") or "") for w in (clip.get("words") or [])).strip()
+    title = str(clip.get("hook") or clip.get("title") or "").strip()
+    base_text = text or title
+    try:
+        from . import ai as ai_module
+
+        if ai_module.configured() and base_text:
+            reply = ai_module.chat([
+                {
+                    "role": "system",
+                    "content": (
+                        "Напиши короткую цепляющую подпись (1–2 предложения) и 4–6 релевантных хэштегов "
+                        "на языке исходного текста для публикации клипа в Shorts/Reels/TikTok. "
+                        "Верни только готовую подпись и хэштеги без лишних комментариев."
+                    ),
+                },
+                {"role": "user", "content": f"Заголовок: {title}\nТекст клипа: {base_text[:1200]}"},
+            ], max_tokens=220, temperature=0.6)
+            caption = str(reply.get("text") or "").strip()
+            if caption:
+                return {"caption": caption, "source": "ai", "model": reply.get("model")}
+    except Exception:  # noqa: BLE001
+        pass
+    caption = analyze._make_caption(title or "Клип", base_text, "shorts")
+    return {"caption": caption, "source": "local", "model": None}
+
 
 def delete_clip(cid: str) -> bool:
     """Удаляет один клип из БД и стирает его артефакты на диске."""

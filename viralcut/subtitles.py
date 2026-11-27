@@ -47,6 +47,24 @@ ACCENT_PALETTE = {
     "white": ("#FFFFFF", "&HFFFFFF&"),
 }
 ACCENTS = {key: value[1] for key, value in ACCENT_PALETTE.items()}
+ANIMATIONS = ("pop", "none", "fade", "slide", "bounce")
+_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def hex_to_ass_color(value: str, fallback: str = "&H4AE2FF&") -> str:
+    """Преобразует именованный акцент или `#RRGGBB` в ASS-формат `&HBBGGRR&`."""
+    raw = str(value or "").strip()
+    if raw in ACCENTS:
+        return ACCENTS[raw]
+    if _HEX_RE.match(raw):
+        r, g, b = raw[1:3], raw[3:5], raw[5:7]
+        return f"&H{b.upper()}{g.upper()}{r.upper()}&"
+    return fallback
+
+
+def is_valid_color(value: str) -> bool:
+    raw = str(value or "").strip()
+    return raw in ACCENTS or bool(_HEX_RE.match(raw))
 
 # key -> family в TTF, файл, метрики для одинаковой визуальной высоты и переносов
 FONTS: Dict[str, Dict[str, Any]] = {
@@ -181,8 +199,8 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Sub,{font_family},{sub_size},{sub_primary},{sub_secondary},&H00000000,&H78000000,0,0,0,0,100,100,1,0,1,{outline},{shadow},2,{margin_lr},{margin_lr},{margin_v_sub},1
-Style: Hook,{font_family},{hook_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H50000000,0,0,0,0,100,100,0.5,0,1,{hook_outline},{shadow},8,{margin_lr},{margin_lr},{margin_v_hook},1
+Style: Sub,{font_family},{sub_size},{sub_primary},{sub_secondary},{outline_color},&H78000000,0,0,0,0,100,100,1,0,1,{outline},{shadow},2,{margin_lr},{margin_lr},{margin_v_sub},1
+Style: Hook,{font_family},{hook_size},&H00FFFFFF,&H00FFFFFF,{outline_color},&H50000000,0,0,0,0,100,100,0.5,0,1,{hook_outline},{shadow},8,{margin_lr},{margin_lr},{margin_v_hook},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -442,12 +460,22 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
               position: str = "bottom", offset: int = 0,
               free_pos: Optional[List[float]] = None,
               speed: str = "calm",
-              aspect: str = "9:16") -> str:
+              aspect: str = "9:16",
+              animation: str = "pop",
+              outline_enabled: bool = True,
+              outline_width: int = 7,
+              outline_color: str = "#000000") -> str:
     """Собирает ASS-файл для фрагмента. Тайминги слов абсолютные (от начала видео)."""
     play_w, play_h = ASPECT_RES.get(aspect, (PLAY_W, PLAY_H))
     font_scale = ASPECT_FONT_SCALE.get(aspect, 1.0)
     safe_width = round(play_w * (940.0 / 1080.0), 1)
-    accent_color = ACCENTS.get(accent, ACCENTS["yellow"])
+    accent_color = hex_to_ass_color(accent, ACCENTS["yellow"])
+    style_primary = accent_color.rstrip("&")
+    if style_primary.startswith("&H") and len(style_primary) == 8:
+        style_primary = "&H00" + style_primary[2:]
+    ass_outline_color = hex_to_ass_color(outline_color, "&H000000&").rstrip("&")
+    if ass_outline_color.startswith("&H") and len(ass_outline_color) == 8:
+        ass_outline_color = "&H00" + ass_outline_color[2:]
     info = font_info(font)
     scale = (0.700 / float(info["cap"])) * font_scale
     size = max(36, min(240, int(round(sub_size * scale))))
@@ -455,11 +483,15 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
     chars = _chars_per_line(info, size, safe_width=safe_width)
     if position not in POSITIONS:
         position = "bottom"
+    anim = str(animation or "pop").strip().lower()
+    if anim not in ANIMATIONS:
+        anim = "pop"
 
     preset = SPEED_PRESETS.get(str(speed), SPEED_PRESETS["calm"])
-    outline = max(4, int(round(7 * font_scale)))
-    hook_outline = max(4, int(round(8 * font_scale)))
-    shadow = max(2, int(round(3 * font_scale)))
+    raw_ow = max(0, min(14, int(outline_width))) if outline_enabled else 0
+    outline = int(round(raw_ow * font_scale)) if raw_ow > 0 else 0
+    hook_outline = max(0, int(round((raw_ow + 1) * font_scale))) if raw_ow > 0 else 0
+    shadow = max(1, int(round(3 * font_scale))) if outline_enabled else 2
     margin_lr = int(round(play_w * (70.0 / 1080.0)))
     margin_v_sub = int(round(play_h * (320.0 / 1920.0)))
     margin_v_hook = int(round(play_h * (240.0 / 1920.0)))
@@ -467,8 +499,9 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
         play_w=play_w, play_h=play_h,
         font_family=info["family"], sub_size=size, hook_size=hook_size_eff,
         outline=outline, hook_outline=hook_outline, shadow=shadow,
+        outline_color=ass_outline_color,
         margin_lr=margin_lr, margin_v_sub=margin_v_sub, margin_v_hook=margin_v_hook,
-        sub_primary=accent_color, sub_secondary="&H00FFFFFF&",
+        sub_primary=style_primary, sub_secondary="&H00FFFFFF",
     )
     events: List[str] = []
     clip_len = max(0.1, clip_end - clip_start)
@@ -577,12 +610,32 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
             shrink = max(0.6, safe_width / (width_px * _SHRINK_RESERVE))
         size_tag = f"\\fs{max(36, int(round(size * shrink)))}" if shrink < 0.995 else ""
         fade_limit = max(0, round((cue_end - cue_start) * 200))
-        tags = (f"\\fad({min(fade_in, fade_limit)},{min(fade_out, fade_limit)})"
-                f"{size_tag}"
-                f"\\fscx104\\fscy104\\t(0,170,\\fscx100\\fscy100)")
+        pos_eff = pos
+        if anim == "none":
+            tags = f"{size_tag}"
+        elif anim == "fade":
+            fi = min(max(140, fade_in), fade_limit)
+            fo = min(max(160, fade_out), fade_limit)
+            tags = f"\\fad({fi},{fo}){size_tag}"
+        elif anim == "slide":
+            m_pos = re.search(r"\\pos\((\d+),(\d+)\)", pos)
+            if m_pos:
+                px, py = int(m_pos.group(1)), int(m_pos.group(2))
+                dy = max(14, int(round(play_h * 0.018)))
+                move_tag = f"\\move({px},{min(play_h - 10, py + dy)},{px},{py},0,180)"
+                pos_eff = re.sub(r"\\pos\(\d+,\d+\)", lambda _m, mt=move_tag: mt, pos)
+            tags = f"\\fad({min(120, fade_limit)},{min(fade_out, fade_limit)}){size_tag}"
+        elif anim == "bounce":
+            tags = (f"\\fad({min(fade_in, fade_limit)},{min(fade_out, fade_limit)})"
+                    f"{size_tag}"
+                    f"\\fscx84\\fscy84\\t(0,115,\\fscx110\\fscy110)\\t(115,220,\\fscx100\\fscy100)")
+        else:  # pop (default)
+            tags = (f"\\fad({min(fade_in, fade_limit)},{min(fade_out, fade_limit)})"
+                    f"{size_tag}"
+                    f"\\fscx106\\fscy106\\t(0,170,\\fscx100\\fscy100)")
         events.append(
             f"Dialogue: 0,{ass_time(cue_start)},{ass_time(cue_end)},Sub,,0,0,0,,"
-            f"{{{pos}{tags}}}{body}"
+            f"{{{pos_eff}{tags}}}{body}"
         )
 
     return header + "\n".join(events) + "\n"

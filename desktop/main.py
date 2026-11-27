@@ -23,7 +23,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict
 
-APP_NAME = "ViralCut"
+APP_NAME = "KrlzCut"
+LEGACY_APP_NAME = "ViralCut"
 
 # при запуске из исходников (python desktop/main.py) пакет viralcut лежит рядом
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -98,7 +99,7 @@ class DesktopApi:
         self.data_dir = data_dir
 
     def _downloads(self) -> Path:
-        folder = downloads_dir() / "ViralCut"
+        folder = downloads_dir() / APP_NAME
         folder.mkdir(parents=True, exist_ok=True)
         return folder
 
@@ -331,11 +332,15 @@ def default_data_dir() -> Path:
         return Path(env).expanduser().resolve()
     if IS_WINDOWS:
         root = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
-        return root / APP_NAME
-    if IS_MACOS:
-        return Path.home() / "Library" / "Application Support" / APP_NAME
-    root = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
-    return root / APP_NAME
+    elif IS_MACOS:
+        root = Path.home() / "Library" / "Application Support"
+    else:
+        root = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    primary = root / APP_NAME
+    legacy = root / LEGACY_APP_NAME
+    if not primary.exists() and legacy.exists():
+        return legacy
+    return primary
 
 
 def free_port(start: int = 8765, attempts: int = 40) -> int:
@@ -742,7 +747,7 @@ def main() -> None:
         # Раньше здесь был молчаливый return: с pythonw пользователь видел, что
         # «ничего не открылось», и не понимал причину.
         message = (f"{APP_NAME} уже запущен.\n\n"
-                   "Закройте окно приложения или завершите процесс ViralCut "
+                   f"Закройте окно приложения или завершите процесс {APP_NAME} "
                    "в диспетчере задач и запустите снова.")
         try:
             print(message, flush=True)

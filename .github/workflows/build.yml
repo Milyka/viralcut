@@ -48,7 +48,7 @@ jobs:
       - name: Verify VC++ Runtime version
         shell: pwsh
         run: |
-          $dll = "dist\ViralCut\_internal\msvcp140.dll"
+          $dll = "dist\KrlzCut\_internal\msvcp140.dll"
           if (-not (Test-Path $dll)) { throw "msvcp140.dll не найден в _internal" }
           $v = (Get-Item $dll).VersionInfo
           Write-Host "msvcp140.dll: $($v.FileVersion)"
@@ -62,7 +62,7 @@ jobs:
           $env:VIRALCUT_HEADLESS = "1"
           $env:VIRALCUT_DATA = "$env:RUNNER_TEMP\vc-smoke"
           $env:VIRALCUT_PORT = "8799"
-          $proc = Start-Process -FilePath "dist\ViralCut\ViralCut.exe" -PassThru
+          $proc = Start-Process -FilePath "dist\KrlzCut\KrlzCut.exe" -PassThru
           try {
             $base = "http://127.0.0.1:8799"
             $ok = $false
@@ -97,12 +97,12 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path dist\ViralCut -DestinationPath "ViralCut-${{ steps.version.outputs.value }}-windows-x64.zip"
+        run: Compress-Archive -Path dist\KrlzCut -DestinationPath "KrlzCut-${{ steps.version.outputs.value }}-windows-x64.zip"
 
       - name: Checksums
         shell: pwsh
         run: |
-          $zip = Get-ChildItem "ViralCut-*-windows-x64.zip"
+          $zip = Get-ChildItem "KrlzCut-*-windows-x64.zip"
           $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
           "$hash  $($zip.Name)" | Out-File -Encoding ascii SHA256SUMS-windows.txt
           Get-Content SHA256SUMS-windows.txt
@@ -111,7 +111,7 @@ jobs:
         with:
           name: windows-zip
           path: |
-            ViralCut-*-windows-x64.zip
+            KrlzCut-*-windows-x64.zip
             SHA256SUMS-windows.txt
 
   release:

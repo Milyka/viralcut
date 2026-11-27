@@ -416,12 +416,14 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 crop_path: Optional[Dict[str, Any]] = None,
                 pip: Optional[Dict[str, Any]] = None,
                 audio_track: int = 0,
-                spans: Optional[List[Dict[str, float]]] = None) -> Dict[str, Any]:
-    """Рендерит вертикальный клип из окна исходника.
+                spans: Optional[List[Dict[str, float]]] = None,
+                game_layer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Рендерит вертикальный/горизонтальный клип из окна исходника.
 
     spans — план склейки без пауз (analyze.cut_plan): отрезки исходника в
     абсолютных секундах. Если он задан, видео и звук режутся trim/atrim, затем
     склеиваются concat — паузы просто исчезают из клипа, а не ускоряются.
+    game_layer — опциональный нижний слой (Split-Screen: Minecraft/satisfying).
     """
     w, h = ASPECTS.get(aspect, ASPECTS["9:16"])
     segments = _cut_spans(spans, clip_start, clip_end)
@@ -434,15 +436,36 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         base = clip_start
         input_len = duration
     info = probe(source)
-    if info["height"] >= 1000:
+    try:
+        from . import settings as app_settings
+
+        rq = str(app_settings.get().get("render_quality") or "balanced")
+    except Exception:
+        rq = "balanced"
+    if rq == "high":
+        crf = min(crf, 16)
+        preset = "fast"
+    elif rq == "fast":
+        crf = max(crf, 23)
+        preset = "ultrafast"
+    elif info["height"] >= 1000:
         crf = min(crf, 19)
         preset = "veryfast"
 
+    # Слой игры (Split-Screen)
+    from . import game_layer as _gl
+
+    game_cfg = _gl.normalize_config(game_layer)
+    game_path: Optional[Path] = _gl.resolve_path(game_cfg["clip_id"]) if game_cfg else None
+    if not game_path:
+        game_cfg = None
+    top_h, bot_h = _gl.split_heights(h, game_cfg["split"]) if game_cfg else (h, 0)
+
     sharpen_base = info["width"] < w * 0.75
 
-    pip_cam = (pip or {}).get("cam") if pip and pip.get("enabled", True) else None
+    pip_cam = (pip or {}).get("cam") if pip and pip.get("enabled", True) and not game_cfg else None
     corner = (pip or {}).get("cam_corner")
-    if pip_cam is None and corner and pip and pip.get("enabled", True):
+    if pip_cam is None and corner and pip and pip.get("enabled", True) and not game_cfg:
         share = float((pip or {}).get("cam_share", 0.3))
         side = max(64, int(round(min(info["width"], info["height"]) * share)))
         margin = int(round(min(info["width"], info["height"]) * 0.02))
@@ -457,22 +480,41 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
         pip_mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
 
+    def _zoom_pan_crop(in_lbl: str, out_lbl: str, tw: int, th: int,
+                       zoom: float, pan: List[float], sharp_flag: bool = False) -> str:
+        z = max(1.0, min(2.2, float(zoom or 1.0)))
+        px = max(0.0, min(1.0, 0.5 + float(pan[0]) * 0.5))
+        py = max(0.0, min(1.0, 0.5 + float(pan[1]) * 0.5))
+        sw = int(round(tw * z))
+        sh = int(round(th * z))
+        sw += sw % 2
+        sh += sh % 2
+        sh_f = ",unsharp=5:5:0.7:5:5:0.0" if sharp_flag else ""
+        return (
+            f"{in_lbl}scale={sw}:{sh}:force_original_aspect_ratio=increase{sh_f},"
+            f"crop={tw}:{th}:(iw-{tw})*{px:.3f}:(ih-{th})*{py:.3f},setsar=1{out_lbl}"
+        )
+
     def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
         audio_only = not info.get("has_video", bool(info["width"] and info["height"]))
+        target_h = top_h if game_cfg else h
         if audio_only:
-            parts = [f"color=c=#0f0e16:s={w}x{h}:r=30:d={duration:.3f}[base]"]
+            parts = [f"color=c=#0f0e16:s={w}x{target_h}:r=30:d={duration:.3f}[base]"]
             prefix = ""
         else:
             sharp = sharpen_base
             src = "[vsrc]" if segments else "[0:v]"
             prefix = _video_spans_graph(segments, base) + ";" if segments else ""
-            if mode == "auto" and path_used:
+            if game_cfg and (game_cfg["top_zoom"] > 1.01 or game_cfg["top_pan"] != [0.0, 0.0]):
+                parts = [_zoom_pan_crop(src, "[base]", w, target_h,
+                                        game_cfg["top_zoom"], game_cfg["top_pan"], sharp)]
+            elif mode == "auto" and path_used and not game_cfg:
                 sharp = float(path_used.get("crop_w", info["width"])) < w * 1.15
-                parts = [_auto_chain(w, h, path_used, sharp, src)]
+                parts = [_auto_chain(w, target_h, path_used, sharp, src)]
             elif mode == "blur" or (mode == "auto" and not path_used):
-                parts = [_bg_chain(w, h, focus_x, sharp, src)]
+                parts = [_bg_chain(w, target_h, focus_x, sharp, src)]
             else:
-                parts = [_crop_chain(w, h, focus_x, sharpen=sharp, src=src)]
+                parts = [_crop_chain(w, target_h, focus_x, sharpen=sharp, src=src)]
             if pip_mask is not None and parts[0].rstrip().endswith("[base]"):
                 from . import pip as _pip
 
@@ -481,6 +523,16 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 py = int(round(min(1.0, max(0.0, float(pos[1]))) * (h - pip_size)))
                 main_step = parts[0].rstrip()[:-len("[base]")] + "[_basem]"
                 parts = [_pip.build_filters(pip_cam, pip_size, px, py, pip_mask, main_step, src)]
+
+        if game_cfg and game_path is not None:
+            game_idx = 2 if pip_mask is not None else 1
+            parts[0] = parts[0].rstrip()[:-len("[base]")] + "[_topv]"
+            parts.append(
+                _zoom_pan_crop(f"[{game_idx}:v]", "[_botv]", w, bot_h,
+                               game_cfg["game_zoom"], game_cfg["game_pan"], False)
+            )
+            parts.append("[_topv]setsar=1[_topn];[_botv]setsar=1[_botn];[_topn][_botn]vstack=inputs=2[base]")
+
         if ass_path is not None:
             fonts_dir = custom_fonts.libass_dir()
             _log_fonts_dir(fonts_dir)
@@ -521,23 +573,47 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                  "-ss", f"{base:.3f}", "-t", f"{input_len:.3f}", "-i", str(source)])
         if pip_mask is not None:
             built += ["-loop", "1", "-framerate", "30", "-i", str(pip_mask)]
+        game_has_audio = False
+        if game_cfg and game_path is not None:
+            built += ["-stream_loop", "-1", "-ss", f"{float(game_cfg.get('start') or 0.0):.2f}",
+                      "-t", f"{duration + 1.0:.3f}", "-i", str(game_path)]
+            if game_cfg.get("audio"):
+                try:
+                    game_has_audio = bool(probe(game_path).get("has_audio"))
+                except Exception:
+                    game_has_audio = False
         graph = filters
         audio_map = f"0:a:{max(0, int(audio_track))}?"
+        use_graph_audio = False
         if info["has_audio"] and segments:
             # звук склеиваем в том же filter_complex, что и видео: паузы выпадают
             graph = (graph + ";" + _audio_spans_graph(segments, base, audio_track) + ";"
-                     + f"[aconc]{_audio_filter()}[aout]")
-            audio_map = "[aout]"
+                     + f"[aconc]{_audio_filter()}[amain]")
+            audio_map = "[amain]"
+            use_graph_audio = True
+        elif info["has_audio"] and game_has_audio:
+            graph = graph + f";[0:a:{max(0, int(audio_track))}]{_audio_filter()}[amain]"
+            audio_map = "[amain]"
+            use_graph_audio = True
+        if game_has_audio and game_cfg:
+            game_idx = 2 if pip_mask is not None else 1
+            if info["has_audio"]:
+                graph += f";[{game_idx}:a]volume=0.22[agame];[amain][agame]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+                audio_map = "[aout]"
+            else:
+                graph += f";[{game_idx}:a]volume=0.5[aout]"
+                audio_map = "[aout]"
+                use_graph_audio = True
         built += ["-filter_complex", graph, "-map", vlabel]
-        if info["has_audio"]:
+        if info["has_audio"] or game_has_audio:
             built += ["-map", audio_map]
-            if not segments:
+            if not use_graph_audio:
                 built += ["-af", _audio_filter()]
             built += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         else:
             built += ["-an"]
         built += ["-threads", str(resources.ffmpeg_threads())] + video_args + [
-            "-r", "30", "-movflags", "+faststart", "-shortest", str(output)]
+            "-r", "30", "-t", f"{duration:.3f}", "-movflags", "+faststart", "-shortest", str(output)]
         return built
 
     encoder_mode = _encoder_mode()
@@ -616,5 +692,29 @@ def make_thumb(clip_path: Path, out_path: Path, at: float = 0.6) -> Optional[Pat
            "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "3", str(out_path)]
     proc = run(cmd)
     return out_path if proc.returncode == 0 and out_path.exists() else None
+
+
+def make_filmstrip(source: Path, out_path: Path, start: float, end: float,
+                   frames: int = 10, thumb_w: int = 96, thumb_h: int = 58) -> Path:
+    """Горизонтальная лента кадров (filmstrip) для визуального таймлайна в редакторе."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    dur = max(0.5, float(end) - float(start))
+    fps = max(0.05, frames / dur)
+    vf = (
+        f"fps={fps:.4f},scale={thumb_w}:{thumb_h}:force_original_aspect_ratio=increase,"
+        f"crop={thumb_w}:{thumb_h},tile={frames}x1"
+    )
+    tmp = out_path.with_name(f".strip_{os.urandom(3).hex()}.jpg")
+    cmd = [
+        ffmpeg(), "-y", "-v", "error",
+        "-ss", f"{max(0.0, start):.3f}", "-t", f"{dur:.3f}", "-i", str(source),
+        "-frames:v", "1", "-vf", vf, "-q:v", "4", str(tmp),
+    ]
+    proc = run(cmd, timeout=45)
+    if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 500:
+        tmp.unlink(missing_ok=True)
+        raise MediaError("Не удалось собрать ленту кадров")
+    tmp.replace(out_path)
+    return out_path
 
 

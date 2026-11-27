@@ -16,9 +16,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import (agent, ai, assistant, cpu_limit, custom_fonts, db, gpu_pref,
-               jobs, pipeline, render, resources, settings as app_settings,
-               system_stats, transcribe, utils)
+from . import (agent, ai, assistant, cpu_limit, custom_fonts, db, game_layer,
+               gpu_pref, jobs, pipeline, render, resources,
+               settings as app_settings, system_stats, transcribe, utils)
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -73,6 +73,15 @@ class SettingsIn(BaseModel):
     ai_key: Optional[str] = None
     clear_ai_key: Optional[bool] = None
     agent_mode: Optional[bool] = None
+    theme: Optional[str] = None
+    palette_a: Optional[str] = None
+    palette_b: Optional[str] = None
+    whisper_model: Optional[str] = None
+    render_quality: Optional[str] = None
+
+
+class ProjectPatchIn(BaseModel):
+    title: str
 
 
 class UpdateSettingsIn(BaseModel):
@@ -118,6 +127,11 @@ class ClipEdit(BaseModel):
     sub_position: Optional[str] = None
     sub_offset: Optional[int] = None
     sub_speed: Optional[str] = None
+    sub_anim: Optional[str] = None
+    sub_outline: Optional[bool] = None
+    sub_outline_width: Optional[int] = None
+    sub_outline_color: Optional[str] = None
+    game_layer: Optional[Dict[str, Any]] = None
     cut_pauses: Optional[bool] = None
 
 
@@ -153,7 +167,7 @@ async def _lifespan(_app: FastAPI):
 
 # CORS не нужен: страница отдаётся с того же origin, что и API. Без него чужая
 # вкладка в браузере не может дёргать локальный сервер (SSRF/забивка диска).
-app = FastAPI(title="ViralCut", version=__version__, lifespan=_lifespan)
+app = FastAPI(title="KrlzCut", version=__version__, lifespan=_lifespan)
 
 
 @app.middleware("http")
@@ -180,7 +194,7 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
         raise HTTPException(400, "Неизвестный формат кадра")
     if "mode" in data and data["mode"] not in ("auto", "blur", "crop"):
         raise HTTPException(400, "Неизвестный режим кадрирования")
-    if "accent" in data and data["accent"] not in subtitles.ACCENTS:
+    if "accent" in data and not subtitles.is_valid_color(data["accent"]):
         raise HTTPException(400, "Неизвестный цвет акцента")
     if data.get("sub_free"):
         try:
@@ -192,6 +206,17 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
         raise HTTPException(400, "Неизвестное положение субтитров")
     if "sub_speed" in data and data["sub_speed"] not in subtitles.SPEEDS:
         raise HTTPException(400, "Неизвестная скорость субтитров")
+    if "sub_anim" in data and data["sub_anim"] not in subtitles.ANIMATIONS:
+        raise HTTPException(400, "Неизвестная анимация субтитров")
+    if "sub_outline_width" in data:
+        try:
+            data["sub_outline_width"] = max(0, min(14, int(data["sub_outline_width"])))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Некорректная толщина обводки") from None
+    if "sub_outline_color" in data and not subtitles.is_valid_color(data["sub_outline_color"]):
+        raise HTTPException(400, "Неизвестный цвет обводки")
+    if "game_layer" in data:
+        data["game_layer"] = game_layer.normalize_config(data["game_layer"])
     if "sub_font" in data and not subtitles.font_exists(data["sub_font"]):
         raise HTTPException(400, "Шрифт не найден")
     if "sub_size" in data:
@@ -589,9 +614,97 @@ def system_state() -> Dict[str, Any]:
         "hw": render.hw_cached(),
         "limits": resources.summary(),
         "encoder_fallback": render.cpu_fallback_notice(),
+        "whisper_model": transcribe.active_model_key(),
+        "whisper_cuda": transcribe._cuda_available(),
     })
-    data["job"] = system_stats.active_job(db.list_projects(5))
+    data["job"] = system_stats.active_job(db.list_projects(10))
     return data
+
+
+@app.get("/api/whisper/models")
+def whisper_models_get() -> Dict[str, Any]:
+    """Список локальных моделей Whisper и их статус загрузки."""
+    return transcribe.models_status()
+
+
+@app.post("/api/whisper/models/{key}/download")
+def whisper_model_download(key: str) -> Dict[str, Any]:
+    try:
+        return transcribe.download_model_async(key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/whisper/models/{key}/select")
+def whisper_model_select(key: str) -> Dict[str, Any]:
+    try:
+        return transcribe.select_model(key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/whisper/models/{key}")
+def whisper_model_delete(key: str) -> Dict[str, Any]:
+    try:
+        return transcribe.delete_model(key)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/game-clips")
+def game_clips_list() -> Dict[str, Any]:
+    """Ролики слоя игры (загруженные пользователем + встроенные)."""
+    return {"clips": game_layer.list_clips(), "presets": list(game_layer.SPLIT_PRESETS)}
+
+
+@app.post("/api/game-clips")
+async def game_clips_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(400, "Файл не выбран")
+    suffix = Path(file.filename).suffix.lower() or ".mp4"
+    if suffix not in game_layer.ALLOWED_SUFFIXES:
+        raise HTTPException(400, f"Формат {suffix} не поддерживается для слоя игры")
+    game_layer.GAME_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = game_layer.GAME_DIR / f".upload_{uuid.uuid4().hex[:8]}{suffix}"
+    written = 0
+    try:
+        with open(tmp, "wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > game_layer.MAX_BYTES:
+                    raise HTTPException(413, "Ролик слоя игры больше 2 ГБ")
+                fh.write(chunk)
+        return game_layer.add_clip(file.filename, tmp)
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except ValueError as exc:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"Не удалось загрузить ролик: {str(exc)[:200]}") from exc
+
+
+@app.delete("/api/game-clips/{gid}")
+def game_clips_delete(gid: str) -> Dict[str, Any]:
+    try:
+        if not game_layer.delete_clip(gid):
+            raise HTTPException(404, "Ролик не найден")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True}
+
+
+@app.get("/api/game-clips/{gid}/video")
+def game_clip_video(gid: str) -> FileResponse:
+    path = game_layer.resolve_path(gid)
+    if not path or not path.is_file():
+        raise HTTPException(404, "Ролик слоя игры недоступен")
+    return FileResponse(path, media_type="video/mp4")
 
 
 @app.get("/api/diagnostics")
@@ -665,9 +778,51 @@ def fonts_css() -> Response:
     return Response("\n".join(lines), media_type="text/css")
 
 
+def _enrich_project(p: Dict[str, Any]) -> Dict[str, Any]:
+    pid = p["id"]
+    clips = db.list_clips(pid)
+    ready = [c for c in clips if c.get("status") == "ready"]
+    thumb_url = ""
+    size_bytes = 0
+    for c in ready:
+        if not thumb_url and c.get("thumb"):
+            tp = Path(c["thumb"])
+            if tp.is_file():
+                thumb_url = f"/media/{pid}/clips/{tp.name}"
+        if c.get("path"):
+            try:
+                size_bytes += Path(c["path"]).stat().st_size
+            except OSError:
+                pass
+    if not thumb_url and p.get("source") and Path(p["source"]).is_file():
+        thumb_url = f"/api/projects/{pid}/frame.jpg?t=2&width=480"
+    if not size_bytes and p.get("source"):
+        try:
+            size_bytes = Path(p["source"]).stat().st_size
+        except OSError:
+            pass
+    p["clips_count"] = len(clips)
+    p["ready_clips"] = len(ready)
+    p["thumb_url"] = thumb_url
+    p["size_bytes"] = size_bytes
+    return p
+
+
 @app.get("/api/projects")
 def projects() -> List[Dict[str, Any]]:
-    return db.list_projects(100)
+    return [_enrich_project(p) for p in db.list_projects(100)]
+
+
+@app.patch("/api/projects/{pid}")
+def project_rename(pid: str, body: ProjectPatchIn) -> Dict[str, Any]:
+    project = db.get_project(pid)
+    if not project:
+        raise HTTPException(404, "Проект не найден")
+    title = (body.title or "").strip()[:160]
+    if not title:
+        raise HTTPException(400, "Название проекта не может быть пустым")
+    db.update_project(pid, title=title)
+    return _enrich_project(db.get_project(pid) or project)
 
 
 @app.post("/api/projects")
@@ -1007,6 +1162,50 @@ def clip_delete(cid: str) -> Dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/api/projects/{pid}/clips/{cid}/strip.jpg")
+def clip_filmstrip(pid: str, cid: str) -> FileResponse:
+    """Горизонтальная раскадровка (10 кадров) для таймлайна редактора клипа."""
+    project = db.get_project(pid)
+    clip = db.get_clip(cid)
+    if not project or not clip or clip.get("project_id") != pid:
+        raise HTTPException(404, "Клип не найден")
+    src: Optional[Path] = None
+    start = float(clip.get("start") or 0.0)
+    end = float(clip.get("end") or 0.0)
+    if project.get("source") and Path(project["source"]).is_file():
+        src = Path(project["source"])
+    elif clip.get("path") and Path(clip["path"]).is_file():
+        src = Path(clip["path"])
+        dur = float(clip.get("duration") or max(1.0, end - start))
+        start, end = 0.0, dur
+    if not src:
+        raise HTTPException(404, "Источник кадров недоступен")
+    workdir = PROJECTS_DIR / pid / "strips"
+    workdir.mkdir(parents=True, exist_ok=True)
+    key = f"{cid}_{int(start * 10)}_{int(end * 10)}.jpg"
+    out = workdir / key
+    if not out.is_file() or out.stat().st_size < 1000:
+        tmp = workdir / f".{key}.{os.urandom(2).hex()}.jpg"
+        try:
+            render.make_filmstrip(src, tmp, start, end, frames=10, thumb_w=120, thumb_h=68)
+            tmp.replace(out)
+        except Exception as exc:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(500, f"Не удалось создать раскадровку: {exc}") from exc
+    return FileResponse(out, media_type="image/jpeg")
+
+
+@app.post("/api/clips/{cid}/caption")
+def clip_generate_caption(cid: str) -> Dict[str, Any]:
+    """Генерирует описание и хэштеги для клипа (ИИ или локальный fallback)."""
+    try:
+        return pipeline.generate_clip_caption(cid)
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Не удалось сгенерировать описание: {str(exc)[:220]}") from exc
+
+
 @app.post("/api/clips/{cid}/rerender")
 def clip_rerender(cid: str, body: ClipEdit) -> Dict[str, Any]:
     clip = db.get_clip(cid)
@@ -1031,12 +1230,12 @@ def project_zip(pid: str) -> FileResponse:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
-    dest = PROJECTS_DIR / pid / f"viralcut_{pid}.zip"
+    dest = PROJECTS_DIR / pid / f"krlzcut_{pid}.zip"
     try:
         pipeline.export_zip(pid, dest)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
-    return FileResponse(dest, filename="viralcut_clips.zip", media_type="application/zip")
+    return FileResponse(dest, filename="krlzcut_clips.zip", media_type="application/zip")
 
 
 @app.get("/")

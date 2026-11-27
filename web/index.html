@@ -1,36 +1,59 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="apple">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ViralCut — вирусные нарезки из длинных видео</title>
+  <title>KrlzCut — AI-студия коротких клипов</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <link rel="stylesheet" id="customFontsCss" href="/api/fonts.css" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%238b5cf6'/%3E%3Cpath d='M18 5 9 18h6l-1 9 9-13h-6l1-9z' fill='white'/%3E%3C/svg%3E" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%236366f1'/%3E%3Cstop offset='100%25' stop-color='%23a855f7'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M10 8v16M10 16l9-8M14 13l8 11' stroke='white' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E" />
 </head>
 <body>
   <div class="app">
     <aside class="sidebar">
-      <div class="brand">
-        <span class="brand-mark">
-          <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M13 2 4.5 14H11l-1 8 8.5-12H12l1-8z" fill="white" stroke="none"/>
-          </svg>
-        </span>
-        ViralCut
+      <div class="brand-row">
+        <button class="brand" id="brandHome" type="button" title="На главную">
+          <span class="brand-mark">
+            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 5v14M7 12l8-7M11 9.5l6.5 9.5"/>
+            </svg>
+          </span>
+          <span class="brand-text">
+            <b>KrlzCut</b>
+            <small id="appVersion">2.0.0</small>
+          </span>
+        </button>
       </div>
 
-      <button class="btn-new" id="newBtn">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        Новый проект
-      </button>
+      <nav class="side-nav" id="sideNav" aria-label="Основная навигация">
+        <button class="nav-item active" data-nav="dashboard" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5.5v-6.5h-5V21H4a1 1 0 0 1-1-1z"/></svg>
+          <span>Главная</span>
+        </button>
+        <button class="nav-item" data-nav="new" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 8v8M8 12h8"/></svg>
+          <span>Новый проект</span>
+        </button>
+        <button class="nav-item" data-nav="projects" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>Проекты</span>
+          <b class="nav-badge" id="navProjectsCount" hidden>0</b>
+        </button>
+        <button class="nav-item" data-nav="queue" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 13 9 5 9-5"/><path d="m3 18 9 5 9-5"/></svg>
+          <span>Очередь</span>
+          <b class="nav-badge live" id="navQueueCount" hidden>0</b>
+        </button>
+        <button class="nav-item" data-nav="settings" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          <span>Настройки</span>
+        </button>
+      </nav>
 
-      <button class="btn-new" id="streamBtn">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>
-        Прямой эфир
-      </button>
-
-      <div class="side-label">История</div>
+      <div class="side-section-head">
+        <span class="side-label">Недавние</span>
+        <button class="side-all-btn" id="sideAllProjects" type="button">Все</button>
+      </div>
       <div class="project-list" id="projectList"></div>
 
       <a class="update-card" id="updateCard" hidden target="_blank" rel="noopener">
@@ -45,47 +68,23 @@
       </a>
 
       <div class="side-foot">
-        <div class="hud-dock" id="hudDock">
-          <div class="hud collapsed" id="sysCard">
-            <button class="hud-head" id="sysToggle" type="button" aria-expanded="false" aria-controls="sysBody" title="Свернуть/развернуть">
-              <span class="hud-dot" id="sysDot"></span>
-              <span class="hud-title">Нагрузка</span>
-              <span class="hud-chip" id="sysHw">GPU</span>
-              <span class="hud-chevron">▾</span>
-            </button>
-            <div class="hud-body" id="sysBody">
-              <div class="sys-row">
-                <span class="sys-label">CPU</span>
-                <span class="sys-bar"><i id="sysCpuBar" style="width:0%"></i></span>
-                <b class="sys-val" id="sysCpuVal">—</b>
-              </div>
-              <div class="sys-row">
-                <span class="sys-label">RAM</span>
-                <span class="sys-bar"><i id="sysRamBar" style="width:0%"></i></span>
-                <b class="sys-val" id="sysRamVal">—</b>
-              </div>
-              <div class="sys-row">
-                <span class="sys-label">GPU</span>
-                <span class="sys-bar"><i id="sysGpuBar" style="width:0%"></i></span>
-                <b class="sys-val" id="sysGpuVal">—</b>
-              </div>
-              <div class="hud-foot">
-                <span id="sysRamText">—</span>
-                <span id="sysJob" class="hud-job"></span>
-              </div>
-            </div>
+        <button class="settings-btn assistant-pill" id="helpBtn" type="button" title="ИИ-помощник KrlzCut">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+          <span>ИИ-помощник</span>
+        </button>
+
+        <div class="gpu-card" id="gpuCard" role="status" aria-label="Состояние оборудования">
+          <div class="gpu-card-top">
+            <span class="gpu-dot" id="gpuDot"></span>
+            <b class="gpu-name" id="gpuName">Проверка движка…</b>
+            <span class="gpu-chip" id="gpuChip">CPU</span>
           </div>
+          <div class="gpu-card-meta">
+            <span id="gpuMeta">Whisper Small</span>
+            <span id="gpuLoad">0%</span>
+          </div>
+          <div class="gpu-mini-bar"><i id="gpuMiniBar" style="width:0%"></i></div>
         </div>
-        <button class="settings-btn" id="helpBtn" type="button" title="Помощник: расскажет, как всё устроено">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
-          Помощник
-        </button>
-        <button class="settings-btn" id="settingsBtn" type="button">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-          Настройки
-        </button>
-        <div class="health" id="health"><span class="dot"></span><span id="healthText">Проверка движка…</span> <small class="app-version" id="appVersion"></small></div>
-        <div class="hint">Всё обрабатывается локально на этом компьютере. Видео никуда не отправляется.</div>
       </div>
     </aside>
 
@@ -96,7 +95,10 @@
   <div id="toasts" role="region" aria-label="Уведомления" aria-live="polite"></div>
   <input type="file" id="fileInput" accept="video/*,audio/*,.mp4,.mov,.mkv,.webm,.m4v,.avi,.ts,.mts,.m2ts,.mp3,.m4a,.wav,.aac,.ogg,.flac" class="hidden" />
   <input type="file" id="fontInput" accept=".ttf,.otf,font/ttf,font/otf" class="hidden" />
+  <input type="file" id="gameInput" accept="video/*,.mp4,.mov,.mkv,.webm,.m4v" class="hidden" />
 
   <script src="/static/app.js"></script>
+  <script src="/static/studio2.js"></script>
+  <script src="/static/editor2.js"></script>
 </body>
 </html>

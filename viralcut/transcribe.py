@@ -88,18 +88,167 @@ class NoSpeechError(TranscriptionError):
     pass
 
 
-def model_cached() -> bool:
-    """Модель уже есть локально (внутри .app или в кэше — сеть не нужна)."""
-    if WHISPER_LOCAL_DIR and (Path(WHISPER_LOCAL_DIR) / "model.bin").is_file():
+WHISPER_CATALOG: List[Dict[str, Any]] = [
+    {
+        "key": "small",
+        "name": "Small",
+        "repo": "Systran/faster-whisper-small",
+        "size_label": "465 МБ",
+        "params": "244 млн параметров",
+        "desc": "Быстрая базовая точность. Подходит для CPU и видеокарт.",
+        "speed": "Быстро",
+        "accuracy": "Базовая",
+        "bundled": True,
+    },
+    {
+        "key": "medium",
+        "name": "Medium",
+        "repo": "Systran/faster-whisper-medium",
+        "size_label": "1.5 ГБ",
+        "params": "769 млн параметров",
+        "desc": "Высокая точность и лучший разбор русской и английской речи. Требует ~3–4 ГБ RAM.",
+        "speed": "Средне",
+        "accuracy": "Высокая",
+        "bundled": False,
+    },
+    {
+        "key": "large-v3-turbo",
+        "name": "Large v3 Turbo",
+        "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+        "size_label": "1.6 ГБ",
+        "params": "809 млн параметров",
+        "desc": "Максимальное качество почти как Large v3 при скорости Medium. Рекомендуется для GPU (CUDA).",
+        "speed": "Средне",
+        "accuracy": "Максимальная",
+        "bundled": False,
+    },
+]
+_MODEL_DOWNLOADS: Dict[str, Dict[str, Any]] = {}
+_ACTIVE_MODEL_KEY: Optional[str] = None
+
+
+def active_model_key() -> str:
+    try:
+        from . import settings as app_settings
+
+        chosen = str(app_settings.get().get("whisper_model") or "").strip()
+        if any(m["key"] == chosen for m in WHISPER_CATALOG):
+            return chosen
+    except Exception:
+        pass
+    return WHISPER_MODEL if any(m["key"] == WHISPER_MODEL for m in WHISPER_CATALOG) else "small"
+
+
+def _hf_cache_dir(repo: str) -> Path:
+    return MODELS_DIR / ("models--" + repo.replace("/", "--"))
+
+
+def is_model_downloaded(key: str) -> bool:
+    spec = next((m for m in WHISPER_CATALOG if m["key"] == key), None)
+    if not spec:
+        return False
+    if key == "small" and WHISPER_LOCAL_DIR and (Path(WHISPER_LOCAL_DIR) / "model.bin").is_file():
         return True
     try:
-        pattern = f"models--Systran--faster-whisper-{WHISPER_MODEL}"
-        for path in MODELS_DIR.glob(pattern + "/snapshots/*/model.bin"):
+        cache_dir = _hf_cache_dir(spec["repo"])
+        for path in cache_dir.glob("snapshots/*/model.bin"):
             if path.stat().st_size > 1024 * 1024:
                 return True
     except Exception:
         pass
     return False
+
+
+def models_status() -> Dict[str, Any]:
+    """Статус всех моделей Whisper для менеджера в настройках."""
+    active = active_model_key()
+    cuda = _cuda_available()
+    items: List[Dict[str, Any]] = []
+    for spec in WHISPER_CATALOG:
+        key = spec["key"]
+        dl = _MODEL_DOWNLOADS.get(key) or {}
+        ready = is_model_downloaded(key)
+        items.append({
+            **spec,
+            "downloaded": ready,
+            "active": key == active,
+            "downloading": bool(dl.get("downloading")),
+            "error": dl.get("error") or "",
+            "can_delete": bool(ready and not (key == "small" and WHISPER_LOCAL_DIR and (Path(WHISPER_LOCAL_DIR) / "model.bin").is_file())),
+        })
+    return {"active": active, "cuda": cuda, "models": items}
+
+
+def download_model_async(key: str) -> Dict[str, Any]:
+    spec = next((m for m in WHISPER_CATALOG if m["key"] == key), None)
+    if not spec:
+        raise ValueError("Неизвестная модель Whisper")
+    if is_model_downloaded(key):
+        return {"ok": True, "already": True, "key": key}
+    cur = _MODEL_DOWNLOADS.get(key)
+    if cur and cur.get("downloading"):
+        return {"ok": True, "downloading": True, "key": key}
+    _MODEL_DOWNLOADS[key] = {"downloading": True, "error": ""}
+
+    def _worker() -> None:
+        try:
+            from huggingface_hub import snapshot_download
+
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                repo_id=spec["repo"],
+                cache_dir=str(MODELS_DIR),
+                allow_patterns=["model.bin", "config.json", "tokenizer.json",
+                                "vocabulary.txt", "vocabulary.json", "preprocessor_config.json"],
+            )
+            _MODEL_DOWNLOADS[key] = {"downloading": False, "error": ""}
+        except Exception as exc:  # noqa: BLE001
+            _MODEL_DOWNLOADS[key] = {"downloading": False, "error": str(exc)[:220]}
+
+    threading.Thread(target=_worker, name=f"whisper-dl-{key}", daemon=True).start()
+    return {"ok": True, "downloading": True, "key": key}
+
+
+def select_model(key: str) -> Dict[str, Any]:
+    global _MODEL, _MODEL_LONG, _ACTIVE_MODEL_KEY
+    spec = next((m for m in WHISPER_CATALOG if m["key"] == key), None)
+    if not spec:
+        raise ValueError("Неизвестная модель Whisper")
+    if not is_model_downloaded(key):
+        raise ValueError("Сначала скачайте эту модель")
+    from . import settings as app_settings
+
+    app_settings.update({"whisper_model": key})
+    with _MODEL_LOCK:
+        _MODEL = None
+        _MODEL_LONG = None
+        _ACTIVE_MODEL_KEY = key
+    return models_status()
+
+
+def delete_model(key: str) -> Dict[str, Any]:
+    global _MODEL, _MODEL_LONG
+    spec = next((m for m in WHISPER_CATALOG if m["key"] == key), None)
+    if not spec:
+        raise ValueError("Неизвестная модель Whisper")
+    if key == "small" and WHISPER_LOCAL_DIR and (Path(WHISPER_LOCAL_DIR) / "model.bin").is_file():
+        raise ValueError("Встроенную модель Small нельзя удалить")
+    cache_dir = _hf_cache_dir(spec["repo"])
+    if active_model_key() == key:
+        from . import settings as app_settings
+
+        app_settings.update({"whisper_model": "small"})
+        with _MODEL_LOCK:
+            _MODEL = None
+            _MODEL_LONG = None
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    return models_status()
+
+
+def model_cached() -> bool:
+    """Модель уже есть локально (внутри .app или в кэше — сеть не нужна)."""
+    return is_model_downloaded(active_model_key())
 
 
 def model_available() -> bool:
@@ -139,16 +288,21 @@ def _reset_model(long_audio: bool = False) -> None:
 
 
 def _get_model(long_audio: bool = False):
-    global _MODEL, _MODEL_LONG
+    global _MODEL, _MODEL_LONG, _ACTIVE_MODEL_KEY
     with _MODEL_LOCK:
+        wanted_key = active_model_key()
+        if _ACTIVE_MODEL_KEY != wanted_key:
+            _MODEL = None
+            _MODEL_LONG = None
+            _ACTIVE_MODEL_KEY = wanted_key
         if long_audio and _MODEL_LONG is not None:
             return _MODEL_LONG
         if not long_audio and _MODEL is not None:
             return _MODEL
         from faster_whisper import WhisperModel
 
-        local_dir = Path(WHISPER_LOCAL_DIR) if WHISPER_LOCAL_DIR else None
-        model_ref = str(local_dir) if local_dir and (local_dir / "model.bin").is_file() else WHISPER_MODEL
+        local_dir = Path(WHISPER_LOCAL_DIR) if (wanted_key == "small" and WHISPER_LOCAL_DIR) else None
+        model_ref = str(local_dir) if local_dir and (local_dir / "model.bin").is_file() else wanted_key
         # Для длинных аудио не используем экспериментальный MPS — на нём
         # ctranslate2 может «зависнуть» на середине многочасового файла.
         if WHISPER_DEVICE == "auto":

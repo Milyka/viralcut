@@ -272,6 +272,38 @@ def list_clips(project_id: str) -> List[Dict[str, Any]]:
     return clips
 
 
+def clip_summaries_by_project() -> Dict[str, Dict[str, Any]]:
+    """Агрегация по клипам всех проектов за один SQL-запрос (без N+1 и stat())."""
+    sql = """
+    SELECT
+        c.project_id,
+        COUNT(*) AS total_clips,
+        SUM(CASE WHEN c.status = 'ready' THEN 1 ELSE 0 END) AS ready_clips,
+        (
+            SELECT c2.thumb FROM clips c2
+            WHERE c2.project_id = c.project_id AND c2.status = 'ready' AND c2.thumb IS NOT NULL AND c2.thumb != ''
+            ORDER BY c2.idx ASC LIMIT 1
+        ) AS first_thumb,
+        (
+            SELECT c2.updated_at FROM clips c2
+            WHERE c2.project_id = c.project_id AND c2.status = 'ready' AND c2.thumb IS NOT NULL AND c2.thumb != ''
+            ORDER BY c2.idx ASC LIMIT 1
+        ) AS first_thumb_updated_at
+    FROM clips c
+    GROUP BY c.project_id
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    with session() as conn:
+        for row in conn.execute(sql).fetchall():
+            out[str(row["project_id"])] = {
+                "total_clips": int(row["total_clips"] or 0),
+                "ready_clips": int(row["ready_clips"] or 0),
+                "thumb": row["first_thumb"] or "",
+                "updated_at": float(row["first_thumb_updated_at"] or 0.0),
+            }
+    return out
+
+
 def clear_clips(project_id: str) -> None:
     with session() as conn:
         conn.execute("DELETE FROM clips WHERE project_id=?", (project_id,))

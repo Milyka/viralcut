@@ -58,10 +58,14 @@ def probe(path: Path) -> Dict[str, Any]:
     if m:
         info["duration"] = _to_seconds(*m.groups())
 
-    vm = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", text)
-    if vm:
-        info["width"], info["height"] = int(vm.group(1)), int(vm.group(2))
-        info["has_video"] = info["width"] > 0 and info["height"] > 0
+    for line in text.splitlines():
+        if "Video:" not in line or "(attached pic)" in line.lower():
+            continue
+        vm = re.search(r"Video:.*?(\d{2,5})x(\d{2,5})", line)
+        if vm:
+            info["width"], info["height"] = int(vm.group(1)), int(vm.group(2))
+            info["has_video"] = info["width"] > 0 and info["height"] > 0
+            break
     fm = re.search(r"(\d+(?:\.\d+)?)\s+fps", text)
     if fm:
         info["fps"] = float(fm.group(1))

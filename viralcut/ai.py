@@ -14,6 +14,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
@@ -132,11 +133,17 @@ def configured() -> bool:
 
 def local_server(base: Optional[str] = None) -> Dict[str, Any]:
     """Ищет локальный OpenAI-совместимый сервер (Ollama, LM Studio)."""
-    candidates = [base] if base else [
-        "http://127.0.0.1:11434/v1",   # Ollama
-        "http://127.0.0.1:1234/v1",    # LM Studio
-        "http://127.0.0.1:8080/v1",    # llama.cpp / vLLM
-    ]
+    if base:
+        parsed = urllib.parse.urlparse(str(base).strip())
+        if parsed.scheme.lower() != "http" or (parsed.hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+            return {"available": False, "base": "", "models": []}
+        candidates = [str(base).strip()]
+    else:
+        candidates = [
+            "http://127.0.0.1:11434/v1",   # Ollama
+            "http://127.0.0.1:1234/v1",    # LM Studio
+            "http://127.0.0.1:8080/v1",    # llama.cpp / vLLM
+        ]
     for url in candidates:
         if not url:
             continue
@@ -205,9 +212,16 @@ def models(force: bool = False, provider: Optional[str] = None,
         # для custom адрес берём из настроек пользователя
         if provider == "custom":
             conf["base"] = str(saved.get("ai_base") or "").strip().rstrip("/")
+    saved_base = conf["base"]
     override_base = str(base_url or "").strip().rstrip("/")
+    strip_key = False
     if override_base and (override_base.startswith("http://") or override_base.startswith("https://")):
-        conf = {**conf, "base": override_base}
+        if conf["provider"] in ("local", "custom"):
+            p_ovr = urllib.parse.urlparse(override_base)
+            p_sav = urllib.parse.urlparse(saved_base) if saved_base else None
+            if p_sav is None or (p_ovr.scheme.lower(), p_ovr.netloc.lower()) != (p_sav.scheme.lower(), p_sav.netloc.lower()):
+                strip_key = True
+            conf = {**conf, "base": override_base}
     if force:
         _MODELS_CACHE["ts"] = 0.0
     now = time.time()
@@ -217,7 +231,7 @@ def models(force: bool = False, provider: Optional[str] = None,
     if not conf["base"]:
         raise AIError("Не выбран адрес API. Укажите базовый URL своего сервера.")
     request = urllib.request.Request(f"{conf['base']}/models", method="GET")
-    api_key = key(conf)
+    api_key = "" if strip_key else key(conf)
     if api_key:
         request.add_header("Authorization", f"Bearer {api_key}")
     try:

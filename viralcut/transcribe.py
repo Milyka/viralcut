@@ -124,6 +124,8 @@ WHISPER_CATALOG: List[Dict[str, Any]] = [
     },
 ]
 _MODEL_DOWNLOADS: Dict[str, Dict[str, Any]] = {}
+_DL_LOCK = threading.Lock()
+_ACTIVE_TRANSCRIBES = 0
 _ACTIVE_MODEL_KEY: Optional[str] = None
 
 
@@ -164,9 +166,11 @@ def models_status() -> Dict[str, Any]:
     active = active_model_key()
     cuda = _cuda_available()
     items: List[Dict[str, Any]] = []
+    with _DL_LOCK:
+        dl_snapshot = {k: dict(v) for k, v in _MODEL_DOWNLOADS.items()}
     for spec in WHISPER_CATALOG:
         key = spec["key"]
-        dl = _MODEL_DOWNLOADS.get(key) or {}
+        dl = dl_snapshot.get(key) or {}
         ready = is_model_downloaded(key)
         items.append({
             **spec,
@@ -185,10 +189,11 @@ def download_model_async(key: str) -> Dict[str, Any]:
         raise ValueError("Неизвестная модель Whisper")
     if is_model_downloaded(key):
         return {"ok": True, "already": True, "key": key}
-    cur = _MODEL_DOWNLOADS.get(key)
-    if cur and cur.get("downloading"):
-        return {"ok": True, "downloading": True, "key": key}
-    _MODEL_DOWNLOADS[key] = {"downloading": True, "error": ""}
+    with _DL_LOCK:
+        cur = _MODEL_DOWNLOADS.get(key)
+        if cur and cur.get("downloading"):
+            return {"ok": True, "downloading": True, "key": key}
+        _MODEL_DOWNLOADS[key] = {"downloading": True, "error": ""}
 
     def _worker() -> None:
         try:
@@ -201,9 +206,11 @@ def download_model_async(key: str) -> Dict[str, Any]:
                 allow_patterns=["model.bin", "config.json", "tokenizer.json",
                                 "vocabulary.txt", "vocabulary.json", "preprocessor_config.json"],
             )
-            _MODEL_DOWNLOADS[key] = {"downloading": False, "error": ""}
+            with _DL_LOCK:
+                _MODEL_DOWNLOADS[key] = {"downloading": False, "error": ""}
         except Exception as exc:  # noqa: BLE001
-            _MODEL_DOWNLOADS[key] = {"downloading": False, "error": str(exc)[:220]}
+            with _DL_LOCK:
+                _MODEL_DOWNLOADS[key] = {"downloading": False, "error": str(exc)[:220]}
 
     threading.Thread(target=_worker, name=f"whisper-dl-{key}", daemon=True).start()
     return {"ok": True, "downloading": True, "key": key}
@@ -227,22 +234,28 @@ def select_model(key: str) -> Dict[str, Any]:
 
 
 def delete_model(key: str) -> Dict[str, Any]:
-    global _MODEL, _MODEL_LONG
+    global _MODEL, _MODEL_LONG, _ACTIVE_MODEL_KEY
     spec = next((m for m in WHISPER_CATALOG if m["key"] == key), None)
     if not spec:
         raise ValueError("Неизвестная модель Whisper")
     if key == "small" and WHISPER_LOCAL_DIR and (Path(WHISPER_LOCAL_DIR) / "model.bin").is_file():
         raise ValueError("Встроенную модель Small нельзя удалить")
-    cache_dir = _hf_cache_dir(spec["repo"])
-    if active_model_key() == key:
-        from . import settings as app_settings
+    with _DL_LOCK:
+        if (_MODEL_DOWNLOADS.get(key) or {}).get("downloading"):
+            raise RuntimeError("Модель сейчас скачивается — дождитесь окончания загрузки")
+    with _MODEL_LOCK:
+        if _ACTIVE_TRANSCRIBES > 0 and (_ACTIVE_MODEL_KEY == key or active_model_key() == key):
+            raise RuntimeError("Модель сейчас используется в активной задаче распознавания")
+        cache_dir = _hf_cache_dir(spec["repo"])
+        if active_model_key() == key:
+            from . import settings as app_settings
 
-        app_settings.update({"whisper_model": "small"})
-        with _MODEL_LOCK:
+            app_settings.update({"whisper_model": "small"})
             _MODEL = None
             _MODEL_LONG = None
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir, ignore_errors=True)
+            _ACTIVE_MODEL_KEY = "small"
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir, ignore_errors=True)
     return models_status()
 
 
@@ -710,7 +723,9 @@ def _split_audio(wav: Path, workdir: Path, chunk_seconds: int) -> tuple[List[tup
 def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                on_progress: ProgressCb = None, *, audio_track: Optional[int] = None,
                window: Optional[tuple[float, float]] = None) -> Dict[str, Any]:
+    global _ACTIVE_TRANSCRIBES
     started = time.time()
+    used_model = active_model_key()
     if on_progress:
         on_progress(0.005, "Подготовка звука для распознавания…")
     try:
@@ -727,6 +742,8 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
     wav = utils.extract_asr_audio(media, workdir / "audio16k.wav",
                                   audio_track=audio_track, window=window)
     chunks_folder: Optional[Path] = None
+    with _MODEL_LOCK:
+        _ACTIVE_TRANSCRIBES += 1
     try:
         chunk_seconds = max(120, int(os.environ.get("VIRALCUT_WHISPER_CHUNK", "600")))
         trigger = max(chunk_seconds, int(os.environ.get("VIRALCUT_WHISPER_CHUNK_MIN", "1800")))
@@ -833,7 +850,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
             "language": (detected_language or language or "ru"),
             "duration": duration,
             "segments": out,
-            "engine": f"whisper-{WHISPER_MODEL}",
+            "engine": f"whisper-{used_model}",
             "took": round(time.time() - started, 1),
             "quality": {
                 "confidence": confidence,
@@ -843,6 +860,8 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
             },
         }
     finally:
+        with _MODEL_LOCK:
+            _ACTIVE_TRANSCRIBES = max(0, _ACTIVE_TRANSCRIBES - 1)
         if chunks_folder is not None:
             shutil.rmtree(chunks_folder, ignore_errors=True)
         try:

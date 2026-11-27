@@ -376,11 +376,14 @@ def _clip_settings(opts: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+MAX_EVEN_CLIPS = 100
+
+
 def _even_segments(duration: float, target_dur: float, count: int) -> List[Dict[str, Any]]:
     """Обычная нарезка: равные фрагменты по времени через FFmpeg без анализа речи."""
     step = max(8.0, float(target_dur or 30.0))
     total_possible = max(1, int(duration // step) + (1 if (duration % step) >= 8.0 else 0))
-    limit = total_possible if count <= 0 else min(total_possible, count)
+    limit = min(total_possible, MAX_EVEN_CLIPS) if count <= 0 else min(total_possible, count, MAX_EVEN_CLIPS)
     out: List[Dict[str, Any]] = []
     for i in range(limit):
         s = round(i * step, 2)
@@ -594,7 +597,9 @@ def prepare_project(pid: str, *, _skip_autostart: bool = False) -> None:
         info = utils.probe(source)
         took = (db.get_project(pid) or {}).get("meta", {}).get("download_seconds")
         took_txt = f" за {took:.0f} с" if took else ""
-        if info["width"] and info["width"] < info["height"]:
+        if not info.get("has_video"):
+            res_txt = "аудио"
+        elif info["width"] and info["width"] < info["height"]:
             res_txt = f"{info['width']}×{info['height']}"
         else:
             res_txt = f"{info['height']}p"
@@ -981,6 +986,14 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
         staged = Path(scratch)
         ass_path = None
         if settings.get("subtitles", True) and words:
+            split_ratio = None
+            from . import game_layer as _gl
+
+            gl_cfg = _gl.normalize_config(settings.get("game_layer"))
+            if gl_cfg and not settings.get("sub_free"):
+                _w, _h = render.ASPECTS.get(settings.get("aspect", "9:16"), render.ASPECTS["9:16"])
+                top_h, _bot_h = _gl.split_heights(_h, gl_cfg["split"])
+                split_ratio = top_h / float(_h)
             text = subtitles.build_ass(
                 words, sub_start, sub_end,
                 hook=clip.get("hook") or clip.get("title") or "",
@@ -998,6 +1011,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 outline_enabled=bool(settings.get("sub_outline", True)),
                 outline_width=int(settings.get("sub_outline_width", 7)),
                 outline_color=str(settings.get("sub_outline_color") or "#000000"),
+                split_ratio=split_ratio,
             )
             ass_path = staged / f"{clip['id']}.ass"
             ass_path.write_text(text, encoding="utf-8")
@@ -1388,6 +1402,13 @@ def delete_clip(cid: str) -> bool:
             path.unlink(missing_ok=True)
         except OSError:
             pass
+    strips_dir = workdir / "strips"
+    if strips_dir.is_dir():
+        for strip_file in strips_dir.glob(f"{cid}_*.jpg"):
+            try:
+                strip_file.unlink(missing_ok=True)
+            except OSError:
+                pass
     remaining = len(db.list_clips(pid))
     db.merge_meta(pid, {"clips": remaining})
     return True
@@ -1398,7 +1419,11 @@ def apply_style_to_project(pid: str, style: Dict[str, Any]) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise KeyError("Проект не найден")
-    patch = {k: style[k] for k in STYLE_KEYS if k in style and style[k] is not None}
+    nullable_keys = {"game_layer", "sub_free"}
+    patch = {
+        k: style[k] for k in STYLE_KEYS
+        if k in style and (style[k] is not None or k in nullable_keys)
+    }
     if "sub_position" in patch and "sub_free" not in patch:
         patch["sub_free"] = None
     if not patch:
@@ -1438,7 +1463,7 @@ def _is_temp_project_file(path: Path) -> bool:
     return (
         name == "audio16k.wav"
         or name.startswith("frame_") and name.endswith(".jpg")
-        or name.startswith("viralcut_") and name.endswith(".zip")
+        or name.startswith(("viralcut_", "krlzcut_")) and name.endswith(".zip")
         or name.startswith("probe_") and name.endswith(".wav")
         or name.startswith("recheck_") and name.endswith(".wav")
     )
@@ -1472,7 +1497,7 @@ def storage_stats(data_dir: Optional[Path] = None,
                 projects_bytes += size
                 rel = item.relative_to(pdir)
                 top = rel.parts[0] if rel.parts else ""
-                if _is_temp_project_file(item) or top.startswith("whisper_chunks_"):
+                if _is_temp_project_file(item) or top.startswith("whisper_chunks_") or top == "strips":
                     temp_bytes += size
                 elif top in ("clips", "previews", "thumbs"):
                     clips_bytes += size
@@ -1530,6 +1555,11 @@ def cleanup_storage(include_sources: bool = False,
                     freed += _dir_size(chunk_dir)
                     shutil.rmtree(chunk_dir, ignore_errors=True)
                     removed += 1
+            strips_dir = pdir / "strips"
+            if strips_dir.is_dir():
+                freed += _dir_size(strips_dir)
+                shutil.rmtree(strips_dir, ignore_errors=True)
+                removed += 1
             for item in list(pdir.iterdir()):
                 if item.is_file() and _is_temp_project_file(item):
                     _unlink(item)

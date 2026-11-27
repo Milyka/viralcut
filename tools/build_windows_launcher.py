@@ -1,4 +1,4 @@
-"""Create a Windows x64 GUI launcher for the portable ViralCut archive."""
+"""Create a Windows x64 GUI launcher for the portable KrlzCut archive."""
 from importlib.resources import files
 from io import BytesIO
 from pathlib import Path
@@ -25,7 +25,7 @@ def build(folder: Path) -> None:
     archive = BytesIO()
     with ZipFile(archive, "w", ZIP_DEFLATED) as bundle:
         bundle.writestr("__main__.py", BOOTSTRAP)
-    (folder / "ViralCut.exe").write_bytes(launcher + SHEBANG + archive.getvalue())
+    (folder / "KrlzCut.exe").write_bytes(launcher + SHEBANG + archive.getvalue())
     (folder / "LICENSE-launcher.txt").write_bytes(Path(__file__).with_name("LICENSE-distlib-launcher.txt").read_bytes())
 
 

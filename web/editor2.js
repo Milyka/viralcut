@@ -59,33 +59,10 @@
   }
 
   function fontCssFamily(key) {
-    const list = (typeof FONT_CATALOG !== "undefined" && Array.isArray(FONT_CATALOG)) ? FONT_CATALOG : [];
-    const found = list.find((f) => f.key === key);
-    if (found && found.css) return found.css;
-    const map = {
-      montserrat: "VCMontserrat",
-      russo: "VCRusso",
-      ptsans: "VCPTSans",
-      lato: "VCLato",
-      play: "VCPlay",
-      philosopher: "VCPhilosopher",
-      oswald: "VCOswald",
-      robotocond: "VCRobotoCond",
-      inter: "VCInter",
-      rubik: "VCRubik",
-      manrope: "VCManrope",
-      unbounded: "VCUnbounded",
-      caveat: "VCCaveat",
-      yeseva: "VCYeseva",
-      exo2: "VCExo2",
-      comfortaa: "VCComfortaa",
-      golos: "VCGolos",
-      onest: "VCOnest",
-      geologica: "VCGeologica",
-      plexcond: "VCPlexCond",
-      rubikmono: "VCRubikMono",
-    };
-    return map[key] || "VCMontserrat";
+    if (typeof FONT_CSS !== "undefined" && FONT_CSS && FONT_CSS[key]) {
+      return FONT_CSS[key];
+    }
+    return "VCMontserrat";
   }
 
   function makeOutlineShadow(enabled, width, color) {
@@ -160,9 +137,11 @@
 
     const origStart = Number(clip.start || 0);
     const origEnd = Number(clip.end || origStart + 15);
-    const maxSourceDur = Math.max(origEnd + 15, Number(project.duration || origEnd + 30));
+    const projDur = Number(project.duration || 0);
+    const maxSourceDur = projDur > 0 ? Math.max(origEnd, projDur) : origEnd;
     const windowMin = Math.max(0, origStart - 12);
     const windowMax = Math.min(maxSourceDur, origEnd + 12);
+    const MIN_CLIP_DUR = 3.0;
 
     const ed = {
       start: origStart,
@@ -174,10 +153,11 @@
       showHook: s.show_hook !== false,
       hook: clip.hook || "",
       text: clip.text || (Array.isArray(clip.words) ? clip.words.map((w) => w.word).join(" ") : ""),
+      textDirty: false,
       caption: clip.caption || "",
       subFont: s.sub_font || "montserrat",
       subSize: Number(s.sub_size || 118),
-      subPos: s.sub_position || "bottom",
+      subPos: s.sub_position === "center" ? "middle" : (s.sub_position || "bottom"),
       subOffset: Number(s.sub_offset || 0),
       subFree: Array.isArray(s.sub_free) && s.sub_free.length >= 2 ? [Number(s.sub_free[0]), Number(s.sub_free[1])] : null,
       subSpeed: s.sub_speed || "calm",
@@ -192,21 +172,22 @@
         enabled: Boolean(glIn.enabled),
         clip_id: defaultGameId,
         split: SPLIT_RATIOS.includes(glIn.split) ? glIn.split : "60/40",
-        start_offset: Number(glIn.start_offset || 0),
+        start: Number(glIn.start ?? glIn.start_offset ?? 0),
         game_zoom: Number(glIn.game_zoom || 1.0),
         top_zoom: Number(glIn.top_zoom || 1.0),
         top_pan: Array.isArray(glIn.top_pan) ? [...glIn.top_pan] : [0, 0],
         game_pan: Array.isArray(glIn.game_pan) ? [...glIn.game_pan] : [0, 0],
-        game_audio: Boolean(glIn.game_audio),
+        audio: Boolean(glIn.audio ?? glIn.game_audio),
       },
     };
 
     const modal = $("#modal");
     modal.classList.remove("hidden");
     const videoSrc = clipUrl(clip);
-    const stripUrl = `/api/projects/${project.id}/clips/${clip.id}/strip.jpg`;
+    const stripUrl = `/api/projects/${project.id}/clips/${clip.id}/strip.jpg?start=${windowMin.toFixed(2)}&end=${windowMax.toFixed(2)}`;
 
     modal.innerHTML = `
+      <div class="modal-backdrop" data-close></div>
       <div class="modal-panel mega-editor" role="dialog" aria-modal="true" aria-label="Мега-редактор клипа">
         <div class="mega-topbar">
           <div class="mega-top-left">
@@ -326,12 +307,12 @@
                   </label>
                 </div>
                 <label style="font-size:12px;color:var(--muted)">
-                  Смещение старта игры: <b id="edGameOffVal">${ed.game.start_offset.toFixed(0)} с</b>
-                  <input id="edGameOff" type="range" min="0" max="120" step="1" value="${ed.game.start_offset}" style="width:100%" />
+                  Смещение старта игры: <b id="edGameOffVal">${ed.game.start.toFixed(0)} с</b>
+                  <input id="edGameOff" type="range" min="0" max="120" step="1" value="${ed.game.start}" style="width:100%" />
                 </label>
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
                   <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px">
-                    <input type="checkbox" id="edGameAudio" ${ed.game.game_audio ? "checked" : ""} /> Звук игры (тихий микс)
+                    <input type="checkbox" id="edGameAudio" ${ed.game.audio ? "checked" : ""} /> Звук игры (тихий микс)
                   </label>
                   <button class="mini-chip" id="edResetPanBtn" type="button">Сбросить кадр</button>
                 </div>
@@ -372,7 +353,7 @@
                   <button class="mini-chip" id="edResetSubPos" type="button" style="padding:2px 8px;font-size:11px">Сбросить</button>
                 </div>
                 <div class="chip-row">
-                  ${[["bottom", "Снизу"], ["center", "По центру"], ["top", "Сверху"]].map(([k, lbl]) => `<button class="mini-chip ${!ed.subFree && ed.subPos === k ? "active" : ""}" data-ed-pos="${k}" type="button">${lbl}</button>`).join("")}
+                  ${[["bottom", "Снизу"], ["middle", "По центру"], ["top", "Сверху"]].map(([k, lbl]) => `<button class="mini-chip ${!ed.subFree && ed.subPos === k ? "active" : ""}" data-ed-pos="${k}" type="button">${lbl}</button>`).join("")}
                 </div>
               </div>
 
@@ -486,7 +467,7 @@
         gameVid.src = nextUrl;
         gameVid.load();
       }
-      gameVid.muted = !ed.game.game_audio;
+      gameVid.muted = !ed.game.audio;
       gameVid.volume = 0.25;
       if (!mainVid.paused) gameVid.play().catch(() => {});
     }
@@ -527,7 +508,8 @@
         subOverlay.style.top = `${Math.round(ed.subFree[1] * 100)}%`;
       } else {
         subOverlay.style.left = "50%";
-        const baseY = ed.subPos === "top" ? 20 : ed.subPos === "center" ? 50 : (ed.game.enabled ? 52 : 78);
+        const splitTopPct = Number((ed.game.split || "60/40").split("/")[0]) || 60;
+        const baseY = ed.subPos === "top" ? 20 : ed.subPos === "middle" ? 50 : (ed.game.enabled ? splitTopPct : 78);
         const yPct = Math.max(10, Math.min(90, baseY - ed.subOffset * 0.14));
         subOverlay.style.top = `${yPct}%`;
       }
@@ -567,10 +549,21 @@
       }
     }
 
+    let curLPct = 0;
+    let curRPct = 100;
+
+    function updatePlayheadUI(frac) {
+      const clamped = Math.max(0, Math.min(1, Number(frac) || 0));
+      const posPct = curLPct + clamped * (curRPct - curLPct);
+      fsPlayhead.style.left = `${posPct}%`;
+    }
+
     function updateTrimUI() {
       const span = Math.max(1, windowMax - windowMin);
       const lPct = Math.max(0, Math.min(95, ((ed.start - windowMin) / span) * 100));
       const rPct = Math.max(lPct + 4, Math.min(100, ((ed.end - windowMin) / span) * 100));
+      curLPct = lPct;
+      curRPct = rPct;
       $("#fsShadeL").style.width = `${lPct}%`;
       $("#fsShadeR").style.width = `${100 - rPct}%`;
       $("#fsWindow").style.left = `${lPct}%`;
@@ -580,6 +573,8 @@
       if ($("#edStart")) $("#edStart").value = ed.start.toFixed(1);
       if ($("#edEnd")) $("#edEnd").value = ed.end.toFixed(1);
       if ($("#edDur")) $("#edDur").value = `${Math.max(0.5, ed.end - ed.start).toFixed(1)} с`;
+      const dur = mainVid.duration || Math.max(0.5, ed.end - ed.start);
+      updatePlayheadUI((mainVid.currentTime || 0) / dur);
     }
 
     // Draggable filmstrip handles
@@ -591,8 +586,8 @@
         const move = (ev) => {
           const pct = Math.max(0, Math.min(1, (ev.clientX - box.left) / box.width));
           const val = windowMin + pct * (windowMax - windowMin);
-          if (side === "left") ed.start = Math.max(0, Math.min(ed.end - 1.0, val));
-          else ed.end = Math.min(maxSourceDur, Math.max(ed.start + 1.0, val));
+          if (side === "left") ed.start = Math.max(0, Math.min(ed.end - MIN_CLIP_DUR, val));
+          else ed.end = Math.min(maxSourceDur, Math.max(ed.start + MIN_CLIP_DUR, val));
           updateTrimUI();
         };
         const up = () => {
@@ -673,7 +668,7 @@
       if (mainVid.paused) {
         mainVid.play().catch(() => {});
         if (ed.game.enabled && gameVid.src) {
-          try { gameVid.currentTime = (ed.game.start_offset + mainVid.currentTime) % Math.max(1, gameVid.duration || 8); } catch (_) {}
+          try { gameVid.currentTime = (ed.game.start + mainVid.currentTime) % Math.max(1, gameVid.duration || 8); } catch (_) {}
           gameVid.play().catch(() => {});
         }
       } else {
@@ -691,19 +686,21 @@
     mainVid.addEventListener("pause", () => { playBtn.innerHTML = ED_SVG.play; gameVid.pause(); });
     mainVid.addEventListener("timeupdate", () => {
       const dur = mainVid.duration || Math.max(1, ed.end - ed.start);
-      const pct = Math.max(0, Math.min(100, (mainVid.currentTime / dur) * 100));
-      scrub.value = String(pct);
+      const frac = Math.max(0, Math.min(1, mainVid.currentTime / dur));
+      scrub.value = String(frac * 100);
       timeEl.textContent = `${fmtSec(mainVid.currentTime)} / ${fmtSec(dur)}`;
-      fsPlayhead.style.left = `${pct}%`;
+      updatePlayheadUI(frac);
       renderLiveCue(mainVid.currentTime, false);
     });
     scrub.addEventListener("input", () => {
       const dur = mainVid.duration || Math.max(1, ed.end - ed.start);
-      const t = (Number(scrub.value) / 100) * dur;
+      const frac = Math.max(0, Math.min(1, Number(scrub.value) / 100));
+      const t = frac * dur;
       mainVid.currentTime = t;
       if (ed.game.enabled && gameVid.duration) {
-        gameVid.currentTime = (ed.game.start_offset + t) % gameVid.duration;
+        gameVid.currentTime = (ed.game.start + t) % gameVid.duration;
       }
+      updatePlayheadUI(frac);
       renderLiveCue(t, false);
     });
     $("#megaMuteBtn")?.addEventListener("click", (e) => {
@@ -739,7 +736,7 @@
     $("#edShowHook")?.addEventListener("change", (e) => { ed.showHook = e.target.checked; applyVisualState(false); });
     $("#edCutPauses")?.addEventListener("change", (e) => { ed.cutPauses = e.target.checked; });
     $("#edFontSel")?.addEventListener("change", (e) => { ed.subFont = e.target.value; applyVisualState(false); });
-    $("#edFontUpload")?.addEventListener("click", () => { state.opts.fontTarget = "#edFontSel"; $("#fontInput")?.click(); });
+    $("#edFontUpload")?.addEventListener("click", () => { state.fontTarget = "#edFontSel"; $("#fontInput")?.click(); });
     $("#edSubSize")?.addEventListener("input", (e) => {
       ed.subSize = Number(e.target.value);
       if ($("#edSubSizeVal")) $("#edSubSizeVal").textContent = String(ed.subSize);
@@ -783,16 +780,16 @@
     });
 
     $("#edAccentSwatches")?.addEventListener("click", (e) => {
-      const sw = e.target.closest("[data-accent]");
-      if (!sw) return;
-      ed.accent = sw.dataset.accent;
-      $$("#edAccentSwatches [data-accent]").forEach((x) => x.classList.toggle("active", x === sw));
+      const sw = e.target.closest(".swatch");
+      if (!sw || !sw.dataset.val) return;
+      ed.accent = sw.dataset.val;
+      $$("#edAccentSwatches .swatch").forEach((x) => x.classList.toggle("active", x === sw));
       if ($("#edAccentPicker")) $("#edAccentPicker").value = accentToHex(ed.accent);
       applyVisualState(false);
     });
     $("#edAccentPicker")?.addEventListener("input", (e) => {
       ed.accent = e.target.value;
-      $$("#edAccentSwatches [data-accent]").forEach((x) => x.classList.remove("active"));
+      $$("#edAccentSwatches .swatch").forEach((x) => x.classList.remove("active"));
       applyVisualState(false);
     });
 
@@ -819,6 +816,7 @@
     $("#edHookInput")?.addEventListener("input", (e) => { ed.hook = e.target.value; applyVisualState(false); });
     $("#edTextInput")?.addEventListener("input", (e) => {
       ed.text = e.target.value;
+      ed.textDirty = true;
       cues = buildLocalCues(clip, ed.text);
       renderLiveCue(mainVid.currentTime || 0, false);
     });
@@ -856,12 +854,12 @@
       applyVisualState(false);
     });
     $("#edGameOff")?.addEventListener("input", (e) => {
-      ed.game.start_offset = Number(e.target.value);
-      if ($("#edGameOffVal")) $("#edGameOffVal").textContent = `${ed.game.start_offset.toFixed(0)} с`;
+      ed.game.start = Number(e.target.value);
+      if ($("#edGameOffVal")) $("#edGameOffVal").textContent = `${ed.game.start.toFixed(0)} с`;
     });
     $("#edGameAudio")?.addEventListener("change", (e) => {
-      ed.game.game_audio = e.target.checked;
-      gameVid.muted = !ed.game.game_audio;
+      ed.game.audio = e.target.checked;
+      gameVid.muted = !ed.game.audio;
     });
     $("#edResetPanBtn")?.addEventListener("click", () => {
       ed.game.top_zoom = 1.0;
@@ -912,11 +910,11 @@
 
     // Numeric trim inputs
     $("#edStart")?.addEventListener("change", (e) => {
-      ed.start = Math.max(0, Math.min(ed.end - 1, Number(e.target.value) || 0));
+      ed.start = Math.max(0, Math.min(ed.end - MIN_CLIP_DUR, Number(e.target.value) || 0));
       updateTrimUI();
     });
     $("#edEnd")?.addEventListener("change", (e) => {
-      ed.end = Math.max(ed.start + 1, Number(e.target.value) || ed.start + 1);
+      ed.end = Math.min(maxSourceDur, Math.max(ed.start + MIN_CLIP_DUR, Number(e.target.value) || ed.start + MIN_CLIP_DUR));
       updateTrimUI();
     });
 
@@ -960,7 +958,6 @@
         subtitles: ed.subtitles,
         show_hook: ed.showHook,
         hook: ed.hook,
-        text: ed.text,
         caption: ed.caption,
         sub_font: ed.subFont,
         sub_size: ed.subSize,
@@ -976,6 +973,7 @@
         cut_pauses: ed.cutPauses,
         game_layer: ed.game,
       };
+      if (ed.textDirty) payload.text = ed.text;
       if (ed.subFree) payload.sub_free = ed.subFree;
       return payload;
     }
@@ -1013,7 +1011,7 @@
       } catch (err) {
         toast(err.message, "err");
         btn.disabled = false;
-        btn.textContent = "Сохранить и перерендерить";
+        btn.textContent = "Перерендерить клип";
       }
     });
 

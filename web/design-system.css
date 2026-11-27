@@ -125,7 +125,6 @@ html[data-theme="crimson"] {
 
 html[data-theme="custom"] {
   --action: var(--theme-a, #0EA5E9);
-  --action-ink: #09090B;
   --action-hover: color-mix(in oklab, var(--theme-a, #0EA5E9) 86%, #FFFFFF);
   --signal: var(--theme-a, #0EA5E9);
   --signal-2: var(--theme-b, #F59E0B);

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -61,32 +62,33 @@ def _save_meta(items: List[Dict[str, Any]]) -> None:
 
 
 def _ensure_builtin(spec: Dict[str, Any]) -> Optional[Path]:
-    GAME_DIR.mkdir(parents=True, exist_ok=True)
-    path = GAME_DIR / spec["file"]
-    if path.is_file() and path.stat().st_size > 8000:
-        return path
-    tmp = GAME_DIR / f".{spec['id']}.tmp.mp4"
-    cmd = [
-        ffmpeg(), "-y", "-v", "error",
-        "-f", "lavfi", "-i", spec["lavfi"],
-        "-t", "8", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(tmp),
-    ]
-    proc = utils.run(cmd, timeout=45)
-    if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 4000:
-        # Запасной генератор, если в сборке ffmpeg нет gradients/life
-        fallback_cmd = [
+    with _LOCK:
+        GAME_DIR.mkdir(parents=True, exist_ok=True)
+        path = GAME_DIR / spec["file"]
+        if path.is_file() and path.stat().st_size > 8000:
+            return path
+        tmp = GAME_DIR / f".{spec['id']}.{os.urandom(3).hex()}.tmp.mp4"
+        cmd = [
             ffmpeg(), "-y", "-v", "error",
-            "-f", "lavfi", "-i", "mandelbrot=s=720x540:r=30",
+            "-f", "lavfi", "-i", spec["lavfi"],
             "-t", "8", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(tmp),
         ]
-        proc = utils.run(fallback_cmd, timeout=45)
-    if proc.returncode == 0 and tmp.is_file() and tmp.stat().st_size >= 4000:
-        tmp.replace(path)
-        return path
-    tmp.unlink(missing_ok=True)
-    return None
+        proc = utils.run(cmd, timeout=45)
+        if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 4000:
+            # Запасной генератор, если в сборке ffmpeg нет gradients/life
+            fallback_cmd = [
+                ffmpeg(), "-y", "-v", "error",
+                "-f", "lavfi", "-i", "mandelbrot=s=720x540:r=30",
+                "-t", "8", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(tmp),
+            ]
+            proc = utils.run(fallback_cmd, timeout=45)
+        if proc.returncode == 0 and tmp.is_file() and tmp.stat().st_size >= 4000:
+            os.replace(tmp, path)
+            return path
+        tmp.unlink(missing_ok=True)
+        return None
 
 
 def list_clips() -> List[Dict[str, Any]]:
@@ -199,16 +201,17 @@ def normalize_config(raw: Any) -> Optional[Dict[str, Any]]:
     split = str(raw.get("split") or "60/40").strip()
     if split not in SPLIT_PRESETS:
         split = "60/40"
+    raw_start = raw.get("start") if raw.get("start") is not None else raw.get("start_offset")
     try:
-        start = max(0.0, float(raw.get("start") or 0.0))
+        start = max(0.0, float(raw_start or 0.0))
     except (TypeError, ValueError):
         start = 0.0
     try:
-        top_zoom = max(1.0, min(2.2, float(raw.get("top_zoom") or 1.0)))
+        top_zoom = max(1.0, min(2.5, float(raw.get("top_zoom") or 1.0)))
     except (TypeError, ValueError):
         top_zoom = 1.0
     try:
-        game_zoom = max(1.0, min(2.2, float(raw.get("game_zoom") or 1.0)))
+        game_zoom = max(1.0, min(2.5, float(raw.get("game_zoom") or 1.0)))
     except (TypeError, ValueError):
         game_zoom = 1.0
 
@@ -230,7 +233,7 @@ def normalize_config(raw: Any) -> Optional[Dict[str, Any]]:
         "game_zoom": round(game_zoom, 2),
         "top_pan": _pan(raw.get("top_pan")),
         "game_pan": _pan(raw.get("game_pan")),
-        "audio": bool(raw.get("audio")),
+        "audio": bool(raw.get("audio") or raw.get("game_audio")),
     }
 
 

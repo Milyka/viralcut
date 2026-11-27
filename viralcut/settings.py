@@ -145,7 +145,14 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
                 data["ai_model"] = ""
             data["ai_provider"] = patch["ai_provider"]
         if "ai_base" in patch:
-            data["ai_base"] = str(patch["ai_base"] or "").strip()[:300]
+            raw_base = str(patch["ai_base"] or "").strip()[:300]
+            if raw_base:
+                import urllib.parse
+
+                parsed = urllib.parse.urlparse(raw_base)
+                if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+                    raise ValueError("Адрес API должен начинаться с http:// или https:// и содержать домен")
+            data["ai_base"] = raw_base
         if "ai_model" in patch:
             data["ai_model"] = str(patch["ai_model"] or "").strip()[:120]
         if patch.get("clear_ai_key"):

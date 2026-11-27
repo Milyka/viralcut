@@ -30,9 +30,9 @@
   const AI_PRESETS = [
     { key: "best", label: "Лучшие", desc: "Самые сильные, цепляющие и досматриваемые моменты видео." },
     { key: "funny", label: "Смешное", desc: "Шутки, ирония, смешные реакции, неловкие паузы и панчлайны." },
-    { key: "emotion", label: "Эмоции", desc: "Искренние переживания, удивление, радость, злость и живые всплески." },
+    { key: "emotions", label: "Эмоции", desc: "Искренние переживания, удивление, радость, злость и живые всплески." },
     { key: "drama", label: "Драма", desc: "Конфликты, споры, напряжение, острые заявления и переломные моменты." },
-    { key: "insight", label: "Инсайты", desc: "Конкретные советы, цифры, лайфхаки, пошаговые выводы и польза." },
+    { key: "insights", label: "Инсайты", desc: "Конкретные советы, цифры, лайфхаки, пошаговые выводы и польза." },
     { key: "action", label: "Экшн", desc: "Быстрый темп, кульминации, динамичные переходы и яркие события." },
     { key: "quotes", label: "Цитаты", desc: "Короткие афористичные мысли и фразы, которые хочется переслать." },
     { key: "story", label: "История", desc: "Законченные мини-истории с завязкой, развитием и неожиданной развязкой." },
@@ -46,6 +46,7 @@
 
   const ui = {
     sourceTab: "link",
+    newUrl: "",
     libFilter: "all",
     libQuery: "",
     libView: "grid",
@@ -55,6 +56,8 @@
     paletteA: localStorage.getItem("krlzPalA") || "#0ea5e9",
     paletteB: localStorage.getItem("krlzPalB") || "#f59e0b",
     whisperPoll: null,
+    activePoll: null,
+    activeSig: "",
     saveThemeTimer: null,
     storage: null,
   };
@@ -78,6 +81,17 @@
     return { cls: "", text: status || "—" };
   }
 
+  function contrastInk(hex) {
+    const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(String(hex || ""));
+    if (!m) return "#09090B";
+    const lin = (c) => {
+      const s = parseInt(c, 16) / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    };
+    const lum = 0.2126 * lin(m[1]) + 0.7152 * lin(m[2]) + 0.0722 * lin(m[3]);
+    return lum > 0.34 ? "#09090B" : "#FAFAFA";
+  }
+
   function applyTheme(theme, palA, palB, persist) {
     const valid = normalizeThemeKey(theme);
     ui.theme = valid;
@@ -88,9 +102,11 @@
     if (ui.theme === "custom") {
       root.style.setProperty("--theme-a", ui.paletteA);
       root.style.setProperty("--theme-b", ui.paletteB);
+      root.style.setProperty("--action-ink", contrastInk(ui.paletteA));
     } else {
       root.style.removeProperty("--theme-a");
       root.style.removeProperty("--theme-b");
+      root.style.removeProperty("--action-ink");
     }
     try {
       localStorage.setItem("krlzTheme", ui.theme);
@@ -357,6 +373,7 @@
 
   function newProjectHTML() {
     const o = state.opts;
+    if (o.cutMode === "stream" && ui.sourceTab !== "link") ui.sourceTab = "link";
     const presetObj = AI_PRESETS.find((p) => p.key === (o.aiPreset || "best")) || AI_PRESETS[0];
     const modeTitle = o.cutMode === "stream" ? "Нарезка стримов" : o.cutMode === "even" ? "Обычная нарезка (FFmpeg)" : "ИИ-нарезка";
     const aspectLabels = { "9:16": "9:16 Вертикальный", "1:1": "1:1 Квадрат", "16:9": "16:9 Горизонтальный", "4:5": "4:5 Пост" };
@@ -377,12 +394,12 @@
             <div class="card-title-row"><h3>1. Источник видео</h3></div>
             <div class="source-tabs">
               <button class="source-tab ${ui.sourceTab === "link" ? "active" : ""}" data-src-tab="link" type="button">Ссылка</button>
-              <button class="source-tab ${ui.sourceTab === "file" ? "active" : ""}" data-src-tab="file" type="button">Локальный файл</button>
+              <button class="source-tab ${ui.sourceTab === "file" ? "active" : ""}" data-src-tab="file" type="button" ${o.cutMode === "stream" ? 'disabled title="Для записи прямых эфиров используется ссылка на поток"' : ""}>Локальный файл</button>
             </div>
 
             ${ui.sourceTab === "link" ? `
               <div style="display:flex;gap:10px;align-items:center">
-                <input id="urlInput" class="input" type="url" style="flex:1;height:44px;padding:0 14px;border-radius:12px;background:rgba(255,255,255,0.055);border:1px solid var(--separator)" placeholder="${o.cutMode === "stream" ? "https://youtube.com/live/... или https://twitch.tv/..." : "Вставьте ссылку на YouTube, Twitch, Rutube, VK или прямой MP4…"}" />
+                <input id="urlInput" class="input" type="url" value="${esc(ui.newUrl)}" style="flex:1;height:44px;padding:0 14px;font-size:13.5px" placeholder="${o.cutMode === "stream" ? "https://youtube.com/live/... или https://twitch.tv/..." : "Вставьте ссылку на YouTube, Twitch, Rutube, VK или прямой MP4…"}" />
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;gap:10px;flex-wrap:wrap">
                 <span class="hint">Поддерживается выбор дорожки озвучки и HD-качества перед стартом.</span>
@@ -424,14 +441,25 @@
           <div class="studio-card">
             <div class="card-title-row">
               <h3>3. ИИ-пресет поиска моментов</h3>
-              <span class="hint">8 сценариев отбора</span>
+              <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text);cursor:pointer">
+                <input type="checkbox" id="newAiModeToggle" ${o.aiMode ? "checked" : ""} ${state.ai?.configured ? "" : "disabled"} />
+                <span>Подбор через LLM</span>
+              </label>
             </div>
             <div class="preset-grid">
               ${AI_PRESETS.map((p) => `<button class="preset-pill ${(o.aiPreset || "best") === p.key ? "active" : ""}" data-ai-preset="${p.key}" type="button">${esc(p.label)}</button>`).join("")}
             </div>
             <div class="preset-desc-box" id="presetDescBox">${esc(presetObj.desc)}</div>
             <div style="margin-top:10px">
-              <input id="newAiPrompt" type="text" value="${esc(o.aiPrompt || "")}" placeholder="Своё уточнение (необязательно), например: ищи только про деньги и кейсы…" style="width:100%;height:38px;padding:0 12px;border-radius:11px;background:rgba(255,255,255,0.045);border:1px solid var(--separator);font-size:13px" />
+              <input id="newAiPrompt" type="text" value="${esc(o.aiPrompt || "")}" placeholder="Своё уточнение для ИИ (необязательно), например: ищи только про деньги и кейсы…" style="width:100%;height:38px;padding:0 12px;font-size:13px" />
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;flex-wrap:wrap">
+              <span class="hint" id="newAiModeHint">${state.ai?.configured
+                ? (o.aiMode
+                    ? `LLM активен: ${esc(state.ai.model || state.ai.provider || "настроено")} — уточнение и пресет передаются модели.`
+                    : "LLM выключен — отбор идёт локальной эвристикой по пресету.")
+                : "API-ключ LLM не задан — используется локальный отбор по пресету. Уточнение выше работает после подключения ИИ."}</span>
+              ${!state.ai?.configured ? `<button class="mini-chip" id="newSetupAiBtn" type="button" style="height:28px;font-size:12px">Настроить ИИ</button>` : ""}
             </div>
           </div>` : ""}
 
@@ -487,6 +515,7 @@
           <div class="summary-rows">
             <div class="summary-row"><span>Режим</span><b>${esc(modeTitle)}</b></div>
             ${o.cutMode !== "even" ? `<div class="summary-row"><span>ИИ-пресет</span><b>${esc(presetObj.label)}</b></div>` : ""}
+            ${o.cutMode !== "even" ? `<div class="summary-row"><span>Отбор моментов</span><b>${o.aiMode && state.ai?.configured ? esc(state.ai.model || "LLM") : "Локальный"}</b></div>` : ""}
             <div class="summary-row"><span>Клипов</span><b>${o.count === 0 ? "Все подходящие" : `до ${o.count}`}</b></div>
             <div class="summary-row"><span>Длительность</span><b>${esc((DUR_PRESETS[o.dur] || DUR_PRESETS["20-45"]).label)}</b></div>
             <div class="summary-row"><span>Формат</span><b>${esc(aspectLabels[o.aspect] || o.aspect)}</b></div>
@@ -506,7 +535,11 @@
 
   function bindNewProject() {
     $$("[data-src-tab]").forEach((b) => {
-      b.addEventListener("click", () => { ui.sourceTab = b.dataset.srcTab; renderNavView(true); });
+      b.addEventListener("click", () => {
+        if (b.disabled) return;
+        ui.sourceTab = b.dataset.srcTab;
+        renderNavView(true);
+      });
     });
     $$("[data-cut-mode]").forEach((b) => {
       b.addEventListener("click", () => {
@@ -541,7 +574,22 @@
       renderNavView(true);
     });
     $("#cookiesSel")?.addEventListener("change", (e) => { state.opts.cookies = e.target.value; });
-    $("#newAiPrompt")?.addEventListener("input", (e) => { state.opts.aiPrompt = e.target.value; });
+    $("#newAiPrompt")?.addEventListener("input", (e) => {
+      state.opts.aiPrompt = e.target.value;
+      if (e.target.value.trim() && state.ai?.configured && !state.opts.aiMode && !state.opts.aiModeTouched) {
+        state.opts.aiMode = true;
+        if ($("#newAiModeToggle")) $("#newAiModeToggle").checked = true;
+      }
+    });
+    $("#newAiModeToggle")?.addEventListener("change", (e) => {
+      state.opts.aiModeTouched = true;
+      state.opts.aiMode = Boolean(e.target.checked);
+      renderNavView(true);
+    });
+    $("#newSetupAiBtn")?.addEventListener("click", () => {
+      if (typeof openSettings === "function") openSettings();
+      else navigate("settings");
+    });
 
     const pickLocal = async () => {
       const native = window.pywebview && window.pywebview.api;
@@ -596,6 +644,7 @@
     };
 
     $("#newLaunchBtn")?.addEventListener("click", launch);
+    $("#urlInput")?.addEventListener("input", (e) => { ui.newUrl = e.target.value; });
     $("#urlInput")?.addEventListener("keydown", (e) => { if (e.key === "Enter") launch(); });
   }
 
@@ -612,38 +661,11 @@
     });
   }
 
-  function projectsLibraryHTML() {
-    const all = state.projects;
-    const cntDone = all.filter((p) => p.status === "done").length;
-    const cntRun = all.filter((p) => ["queued", "running", "preparing", "processing", "review"].includes(p.status)).length;
-    const cntErr = all.filter((p) => p.status === "error").length;
+  function projectsContentHTML() {
     const items = filteredProjects();
     const sel = items.find((p) => p.id === ui.selectedPid) || items[0] || null;
     if (sel) ui.selectedPid = sel.id;
-
     return `
-      <section class="page-head">
-        <div>
-          <h1>Проекты</h1>
-          <p>Вся библиотека нарезок с быстрым предпросмотром, поиском и переименованием.</p>
-        </div>
-        <button class="btn-primary" id="libNewBtn" type="button">+ Новый проект</button>
-      </section>
-
-      <div class="lib-toolbar">
-        <div class="filter-pills">
-          <button class="filter-pill ${ui.libFilter === "all" ? "active" : ""}" data-lib-filter="all" type="button">Все (${all.length})</button>
-          <button class="filter-pill ${ui.libFilter === "done" ? "active" : ""}" data-lib-filter="done" type="button">Готовые (${cntDone})</button>
-          <button class="filter-pill ${ui.libFilter === "running" ? "active" : ""}" data-lib-filter="running" type="button">В работе (${cntRun})</button>
-          <button class="filter-pill ${ui.libFilter === "error" ? "active" : ""}" data-lib-filter="error" type="button">Ошибки (${cntErr})</button>
-        </div>
-        <div class="lib-search">
-          <input id="libSearchInput" type="search" value="${esc(ui.libQuery)}" placeholder="Поиск проекта…" />
-          <button class="mini-chip ${ui.libView === "grid" ? "active" : ""}" data-lib-view="grid" type="button">Сетка</button>
-          <button class="mini-chip ${ui.libView === "list" ? "active" : ""}" data-lib-view="list" type="button">Список</button>
-        </div>
-      </div>
-
       <div class="lib-layout ${sel ? "" : "no-preview"}">
         <div>
           ${items.length ? `<div class="lib-grid ${ui.libView === "list" ? "list-view" : ""}">
@@ -668,7 +690,7 @@
               </article>`;
             }).join("")}
           </div>` : `<div class="studio-card" style="text-align:center;padding:42px 20px">
-            <div style="font-size:16px;font-weight:660;margin-bottom:6px">Ничего не найдено</div>
+            <div style="font-size:16px;font-weight:600;margin-bottom:6px">Ничего не найдено</div>
             <div class="hint">Попробуйте сбросить фильтр или создайте новый проект.</div>
           </div>`}
         </div>
@@ -693,24 +715,45 @@
     `;
   }
 
-  function bindProjectsLibrary() {
-    $("#libNewBtn")?.addEventListener("click", () => navigate("new"));
-    $$("[data-lib-filter]").forEach((b) => {
-      b.addEventListener("click", () => { ui.libFilter = b.dataset.libFilter; renderNavView(true); });
-    });
-    $$("[data-lib-view]").forEach((b) => {
-      b.addEventListener("click", () => { ui.libView = b.dataset.libView; renderNavView(true); });
-    });
-    $("#libSearchInput")?.addEventListener("input", (e) => {
-      ui.libQuery = e.target.value;
-      renderNavView(true);
-      const inp = $("#libSearchInput");
-      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
-    });
+  function projectsLibraryHTML() {
+    const all = state.projects;
+    const cntDone = all.filter((p) => p.status === "done").length;
+    const cntRun = all.filter((p) => ["queued", "running", "preparing", "processing", "review"].includes(p.status)).length;
+    const cntErr = all.filter((p) => p.status === "error").length;
+
+    return `
+      <section class="page-head">
+        <div>
+          <h1>Проекты</h1>
+          <p>Вся библиотека нарезок с быстрым предпросмотром, поиском и переименованием.</p>
+        </div>
+        <button class="btn-primary" id="libNewBtn" type="button" style="display:inline-flex;align-items:center;gap:7px">${SVG.plus}<span>Создать проект</span></button>
+      </section>
+
+      <div class="lib-toolbar">
+        <div class="filter-pills">
+          <button class="filter-pill ${ui.libFilter === "all" ? "active" : ""}" data-lib-filter="all" type="button">Все (${all.length})</button>
+          <button class="filter-pill ${ui.libFilter === "done" ? "active" : ""}" data-lib-filter="done" type="button">Готовые (${cntDone})</button>
+          <button class="filter-pill ${ui.libFilter === "running" ? "active" : ""}" data-lib-filter="running" type="button">В работе (${cntRun})</button>
+          <button class="filter-pill ${ui.libFilter === "error" ? "active" : ""}" data-lib-filter="error" type="button">Ошибки (${cntErr})</button>
+        </div>
+        <div class="lib-search">
+          <input id="libSearchInput" type="search" value="${esc(ui.libQuery)}" placeholder="Поиск проекта…" />
+          <button class="mini-chip ${ui.libView === "grid" ? "active" : ""}" data-lib-view="grid" type="button">Сетка</button>
+          <button class="mini-chip ${ui.libView === "list" ? "active" : ""}" data-lib-view="list" type="button">Список</button>
+        </div>
+      </div>
+
+      <div id="libContent">${projectsContentHTML()}</div>
+    `;
+  }
+
+  function bindProjectsContent() {
     $$("[data-sel-pid]").forEach((card) => {
       card.addEventListener("click", () => {
         ui.selectedPid = card.dataset.selPid;
-        renderNavView(true);
+        const box = $("#libContent");
+        if (box) { box.innerHTML = projectsContentHTML(); bindProjectsContent(); }
       });
       card.addEventListener("dblclick", () => openProject(card.dataset.selPid));
     });
@@ -730,11 +773,28 @@
     });
   }
 
+  function bindProjectsLibrary() {
+    $("#libNewBtn")?.addEventListener("click", () => navigate("new"));
+    $$("[data-lib-filter]").forEach((b) => {
+      b.addEventListener("click", () => { ui.libFilter = b.dataset.libFilter; renderNavView(true); });
+    });
+    $$("[data-lib-view]").forEach((b) => {
+      b.addEventListener("click", () => { ui.libView = b.dataset.libView; renderNavView(true); });
+    });
+    $("#libSearchInput")?.addEventListener("input", (e) => {
+      ui.libQuery = e.target.value;
+      const box = $("#libContent");
+      if (box) { box.innerHTML = projectsContentHTML(); bindProjectsContent(); }
+    });
+    bindProjectsContent();
+  }
+
   function renameProject(project) {
     if (!project) return;
     const modal = $("#modal");
     modal.classList.remove("hidden");
     modal.innerHTML = `
+      <div class="modal-backdrop" data-close></div>
       <div class="modal-panel" style="max-width:460px">
         <div class="modal-head">
           <h3>Переименовать проект</h3>
@@ -858,7 +918,7 @@
       state.settingsData = conf;
       state.whisperData = whisper;
       ui.storage = storage;
-      applyTheme(conf.theme || "apple", conf.palette_a || ui.paletteA, conf.palette_b || ui.paletteB, false);
+      applyTheme(conf.theme || "obsidian", conf.palette_a || ui.paletteA, conf.palette_b || ui.paletteB, false);
     } catch (e) { console.error(e); }
   }
 
@@ -993,9 +1053,9 @@
 
             <div style="padding:12px;border-radius:12px;background:rgba(255,255,255,0.035);border:1px solid var(--separator)">
               <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px">
-                <span>Занято на диске</span><b>${fmtBytes(st.total)}</b>
+                <span>Занято на диске</span><b>${fmtBytes(st.total_bytes)}</b>
               </div>
-              <div class="hint" style="margin-bottom:10px">Исходники: ${fmtBytes(st.sources)} · Клипы: ${fmtBytes(st.clips)} · Кэш: ${fmtBytes(st.cache)}</div>
+              <div class="hint" style="margin-bottom:10px">Исходники: ${fmtBytes(st.sources_bytes)} · Клипы: ${fmtBytes(st.clips_bytes)} · Кэш и временные: ${fmtBytes((st.temp_bytes || 0) + (st.cache_bytes || 0))}</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <button class="btn-ghost" id="setCleanCacheBtn" type="button">Очистить кэш</button>
                 <button class="btn-ghost danger" id="setCleanAllBtn" type="button">Очистить кэш и исходники</button>
@@ -1087,6 +1147,9 @@
         } catch (err) { toast(err.message, "err"); }
       });
     });
+    $("#setPowerRange")?.addEventListener("input", (e) => {
+      if ($("#setPowerVal")) $("#setPowerVal").textContent = `${Number(e.target.value)}%`;
+    });
     $("#setPowerRange")?.addEventListener("change", async (e) => {
       const val = Number(e.target.value);
       if ($("#setPowerVal")) $("#setPowerVal").textContent = `${val}%`;
@@ -1094,6 +1157,9 @@
         state.settingsData = await api("/api/settings", { method: "POST", body: JSON.stringify({ power: val }) });
         toast(`Мощность: ${val}%`);
       } catch (err) { toast(err.message, "err"); }
+    });
+    $("#setCpuRange")?.addEventListener("input", (e) => {
+      if ($("#setCpuVal")) $("#setCpuVal").textContent = `${Number(e.target.value)}%`;
     });
     $("#setCpuRange")?.addEventListener("change", async (e) => {
       const val = Number(e.target.value);
@@ -1111,6 +1177,7 @@
         const modal = $("#modal");
         modal.classList.remove("hidden");
         modal.innerHTML = `
+          <div class="modal-backdrop" data-close></div>
           <div class="modal-panel" style="max-width:760px">
             <div class="modal-head">
               <h3>Журнал диагностики KrlzCut</h3>
@@ -1134,7 +1201,7 @@
     $("#setCleanCacheBtn")?.addEventListener("click", async () => {
       try {
         const res = await api("/api/storage/cleanup", { method: "POST", body: JSON.stringify({ include_sources: false }) });
-        toast(`Освобождено ${fmtBytes(res.freed)}`);
+        toast(`Освобождено ${fmtBytes(res.freed_bytes)}`);
         await loadSettingsViewData();
         renderNavView(true);
       } catch (err) { toast(err.message, "err"); }
@@ -1143,7 +1210,7 @@
       if (!confirm("Удалить временный кэш и исходники готовых проектов? Готовые клипы останутся.")) return;
       try {
         const res = await api("/api/storage/cleanup", { method: "POST", body: JSON.stringify({ include_sources: true }) });
-        toast(`Освобождено ${fmtBytes(res.freed)}`);
+        toast(`Освобождено ${fmtBytes(res.freed_bytes)}`);
         await loadSettingsViewData();
         renderNavView(true);
       } catch (err) { toast(err.message, "err"); }
@@ -1171,6 +1238,50 @@
     }, 2200);
   }
 
+  function projectsSignature() {
+    return (state.projects || [])
+      .map((p) => `${p.id}:${p.status}:${Math.round(p.progress || 0)}:${p.stage || ""}:${p.clips_count ?? ""}`)
+      .join("|");
+  }
+
+  function hasActiveProjects() {
+    return (state.projects || []).some((p) =>
+      ["queued", "running", "preparing", "processing"].includes(p.status)
+    );
+  }
+
+  function stopActivePoll() {
+    if (ui.activePoll) {
+      clearInterval(ui.activePoll);
+      ui.activePoll = null;
+    }
+  }
+
+  function syncActivePoll() {
+    const onLiveView = !state.current && (state.nav === "queue" || state.nav === "dashboard");
+    if (!onLiveView || !hasActiveProjects()) {
+      stopActivePoll();
+      return;
+    }
+    ui.activeSig = projectsSignature();
+    if (ui.activePoll) return;
+    ui.activePoll = setInterval(async () => {
+      if (state.current || (state.nav !== "queue" && state.nav !== "dashboard")) {
+        stopActivePoll();
+        return;
+      }
+      try {
+        await loadProjects();
+        const sig = projectsSignature();
+        if (sig !== ui.activeSig) {
+          ui.activeSig = sig;
+          if (!state.current) renderNavView(true);
+        }
+        if (!hasActiveProjects()) stopActivePoll();
+      } catch (_) {}
+    }, 2500);
+  }
+
   /* ---------------- Navigation & Boot ---------------- */
 
   async function navigate(navKey) {
@@ -1179,19 +1290,28 @@
     state.detail = null;
     state.mainKey = "";
     clearTimeout(state.pollTimer);
+    stopActivePoll();
     history.replaceState(null, "", location.pathname);
     renderSidebar();
     if (state.nav === "settings") {
       await loadSettingsViewData();
     } else if (state.nav === "projects" || state.nav === "queue" || state.nav === "dashboard") {
-      loadProjects().then(() => { if (!state.current) renderNavView(true); });
+      loadProjects().then(() => {
+        if (!state.current) {
+          renderNavView(true);
+          syncActivePoll();
+        }
+      });
     }
     renderNavView(true);
   }
 
   function renderNavView(force) {
     const main = $("#main");
-    if (!main || state.current) return;
+    if (!main || state.current) {
+      stopActivePoll();
+      return;
+    }
     const key = `nav:${state.nav}`;
     if (!force && state.mainKey === key) return;
     state.mainKey = key;
@@ -1211,6 +1331,7 @@
       main.innerHTML = dashboardHTML();
       bindDashboard();
     }
+    syncActivePoll();
   }
 
   function init() {

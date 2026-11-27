@@ -93,15 +93,28 @@ def _style_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         out["aspect"] = item["aspect"]
     if str(item.get("mode") or "") in _MODES:
         out["mode"] = item["mode"]
-    if str(item.get("accent") or "") in subtitles.ACCENTS:
-        out["accent"] = item["accent"]
+    if item.get("accent") and subtitles.is_valid_color(str(item["accent"])):
+        out["accent"] = str(item["accent"]).strip()
     font_key = str(item.get("sub_font") or "")
     if font_key and subtitles.font_exists(font_key):
         out["sub_font"] = font_key
-    if str(item.get("sub_position") or "") in _POSITIONS:
-        out["sub_position"] = item["sub_position"]
+    pos_val = "middle" if str(item.get("sub_position") or "") == "center" else str(item.get("sub_position") or "")
+    if pos_val in _POSITIONS:
+        out["sub_position"] = pos_val
     if isinstance(item.get("sub_size"), (int, float)):
         out["sub_size"] = max(70, min(180, int(item["sub_size"])))
+    if str(item.get("sub_anim") or "") in subtitles.ANIMATIONS:
+        out["sub_anim"] = str(item["sub_anim"])
+    if "sub_outline" in item:
+        out["sub_outline"] = bool(item["sub_outline"])
+    if isinstance(item.get("sub_outline_width"), (int, float)):
+        out["sub_outline_width"] = max(0, min(14, int(item["sub_outline_width"])))
+    if item.get("sub_outline_color") and subtitles.is_valid_color(str(item["sub_outline_color"])):
+        out["sub_outline_color"] = str(item["sub_outline_color"]).strip()
+    if str(item.get("cut_mode") or "") in ("ai", "even", "stream"):
+        out["cut_mode"] = str(item["cut_mode"])
+    if str(item.get("ai_preset") or "") in pipeline.AI_PRESET_PROMPTS:
+        out["ai_preset"] = str(item["ai_preset"])
     if "subtitles" in item:
         out["subtitles"] = bool(item["subtitles"])
     if "cut_pauses" in item:

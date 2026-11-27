@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import sys
 import time
 import traceback
+import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Form, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -169,10 +171,42 @@ async def _lifespan(_app: FastAPI):
 # вкладка в браузере не может дёргать локальный сервер (SSRF/забивка диска).
 app = FastAPI(title="KrlzCut", version=__version__, lifespan=_lifespan)
 
+_SESSION_TOKEN = secrets.token_hex(24)
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _extract_hostname(raw_host: str) -> str:
+    host = (raw_host or "").strip().lower()
+    if not host:
+        return ""
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end != -1 else host
+    return host.split(":", 1)[0]
+
 
 @app.middleware("http")
-async def _static_cache_headers(request, call_next):
-    """Шрифты и статика неизменяемы в пределах сессии — не перекачиваем их каждым опросом."""
+async def _security_guard(request, call_next):
+    """Защита локального сервера от DNS rebinding и межсайтовых запросов (CSRF)."""
+    host_hdr = request.headers.get("host", "")
+    hostname = _extract_hostname(host_hdr)
+    if hostname and hostname not in _LOOPBACK_HOSTS:
+        return JSONResponse({"detail": "Недопустимый заголовок Host"}, status_code=403)
+
+    if request.method.upper() in _MUTATING_METHODS:
+        if request.headers.get("sec-fetch-site", "").strip().lower() == "cross-site":
+            return JSONResponse({"detail": "Межсайтовые запросы запрещены"}, status_code=403)
+        origin = request.headers.get("origin", "").strip()
+        if origin:
+            orig_host = (urllib.parse.urlparse(origin).hostname or "").lower()
+            if orig_host not in _LOOPBACK_HOSTS:
+                return JSONResponse({"detail": "Недопустимый источник запроса (Origin)"}, status_code=403)
+        if request.url.path.startswith("/api/"):
+            provided = request.headers.get("x-krlz-token", "").strip()
+            if not provided or not secrets.compare_digest(provided, _SESSION_TOKEN):
+                return JSONResponse({"detail": "Недействительный токен сессии"}, status_code=403)
+
     response = await call_next(request)
     path = request.url.path
     if path.startswith(("/fonts/", "/userfonts/", "/static/")):
@@ -189,7 +223,12 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
     """
     from . import render, subtitles
 
-    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    raw_dump = body.model_dump()
+    nullable_keys = {"game_layer", "sub_free"}
+    data = {
+        k: v for k, v in raw_dump.items()
+        if v is not None or (k in nullable_keys and k in body.model_fields_set)
+    }
     if "aspect" in data and data["aspect"] not in render.ASPECTS:
         raise HTTPException(400, "Неизвестный формат кадра")
     if "mode" in data and data["mode"] not in ("auto", "blur", "crop"):
@@ -202,6 +241,8 @@ def _clean_clip_edit(body: ClipEdit) -> Dict[str, Any]:
         except (TypeError, ValueError):
             raise HTTPException(400, "Неверная позиция субтитров") from None
         data["sub_free"] = [min(1.0, max(0.0, x)), min(1.0, max(0.0, y))]
+    if data.get("sub_position") == "center":
+        data["sub_position"] = "middle"
     if "sub_position" in data and data["sub_position"] not in subtitles.POSITIONS:
         raise HTTPException(400, "Неизвестное положение субтитров")
     if "sub_speed" in data and data["sub_speed"] not in subtitles.SPEEDS:
@@ -446,7 +487,10 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
     from . import settings as app_settings
 
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
-    data = app_settings.update(patch)
+    try:
+        data = app_settings.update(patch)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     # новый уровень мощности применяется сразу: шлагбаум рендеров читает его
     # из настроек на каждой задаче, а кэш сбрасываем, чтобы не ждать секунду
     resources.invalidate()
@@ -647,6 +691,8 @@ def whisper_model_select(key: str) -> Dict[str, Any]:
 def whisper_model_delete(key: str) -> Dict[str, Any]:
     try:
         return transcribe.delete_model(key)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -699,12 +745,22 @@ def game_clips_delete(gid: str) -> Dict[str, Any]:
     return {"ok": True}
 
 
+_GAME_MIME = {
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+}
+
+
 @app.get("/api/game-clips/{gid}/video")
 def game_clip_video(gid: str) -> FileResponse:
     path = game_layer.resolve_path(gid)
     if not path or not path.is_file():
         raise HTTPException(404, "Ролик слоя игры недоступен")
-    return FileResponse(path, media_type="video/mp4")
+    media_type = _GAME_MIME.get(path.suffix.lower(), "video/mp4")
+    return FileResponse(path, media_type=media_type)
 
 
 @app.get("/api/diagnostics")
@@ -778,31 +834,41 @@ def fonts_css() -> Response:
     return Response("\n".join(lines), media_type="text/css")
 
 
-def _enrich_project(p: Dict[str, Any]) -> Dict[str, Any]:
+def _thumb_path_to_url(pid: str, raw_thumb: str) -> str:
+    if not raw_thumb:
+        return ""
+    tp = Path(raw_thumb)
+    try:
+        rel = tp.relative_to(PROJECTS_DIR / pid).as_posix()
+        return f"/media/{pid}/{rel}"
+    except ValueError:
+        return f"/media/{pid}/thumbs/{tp.name}"
+
+
+def _enrich_project(p: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     pid = p["id"]
-    clips = db.list_clips(pid)
-    ready = [c for c in clips if c.get("status") == "ready"]
     thumb_url = ""
     size_bytes = 0
-    for c in ready:
-        if not thumb_url and c.get("thumb"):
-            tp = Path(c["thumb"])
-            if tp.is_file():
-                thumb_url = f"/media/{pid}/clips/{tp.name}"
-        if c.get("path"):
-            try:
-                size_bytes += Path(c["path"]).stat().st_size
-            except OSError:
-                pass
+    if summary is not None:
+        total_clips = int(summary.get("total_clips") or 0)
+        ready_clips = int(summary.get("ready_clips") or 0)
+        if summary.get("thumb"):
+            thumb_url = _thumb_path_to_url(pid, str(summary["thumb"]))
+    else:
+        clips = db.list_clips(pid)
+        ready = [c for c in clips if c.get("status") == "ready"]
+        total_clips = len(clips)
+        ready_clips = len(ready)
+        for c in ready:
+            if not thumb_url and c.get("thumb"):
+                tp = Path(c["thumb"])
+                if tp.is_file():
+                    thumb_url = _thumb_path_to_url(pid, c["thumb"])
+                    break
     if not thumb_url and p.get("source") and Path(p["source"]).is_file():
         thumb_url = f"/api/projects/{pid}/frame.jpg?t=2&width=480"
-    if not size_bytes and p.get("source"):
-        try:
-            size_bytes = Path(p["source"]).stat().st_size
-        except OSError:
-            pass
-    p["clips_count"] = len(clips)
-    p["ready_clips"] = len(ready)
+    p["clips_count"] = total_clips
+    p["ready_clips"] = ready_clips
     p["thumb_url"] = thumb_url
     p["size_bytes"] = size_bytes
     return p
@@ -810,7 +876,9 @@ def _enrich_project(p: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/projects")
 def projects() -> List[Dict[str, Any]]:
-    return [_enrich_project(p) for p in db.list_projects(100)]
+    summaries = db.clip_summaries_by_project()
+    empty = {"total_clips": 0, "ready_clips": 0, "thumb": ""}
+    return [_enrich_project(p, summaries.get(p["id"], empty)) for p in db.list_projects(100)]
 
 
 @app.patch("/api/projects/{pid}")
@@ -1094,6 +1162,9 @@ def project_delete(pid: str) -> Dict[str, Any]:
     # продолжает писать в папку, которую мы сейчас удаляем.
     live.stop_stream(pid)
     pipeline.request_cancel(pid)
+    deadline = time.time() + 3.0
+    while jobs.is_running(pid) and time.time() < deadline:
+        time.sleep(0.1)
     db.delete_project(pid)
     pipeline.delete_project_files(pid)
     return {"ok": True}
@@ -1163,31 +1234,49 @@ def clip_delete(cid: str) -> Dict[str, Any]:
 
 
 @app.get("/api/projects/{pid}/clips/{cid}/strip.jpg")
-def clip_filmstrip(pid: str, cid: str) -> FileResponse:
+def clip_filmstrip(pid: str, cid: str, start: Optional[float] = None,
+                   end: Optional[float] = None) -> FileResponse:
     """Горизонтальная раскадровка (10 кадров) для таймлайна редактора клипа."""
+    import math
+
     project = db.get_project(pid)
     clip = db.get_clip(cid)
     if not project or not clip or clip.get("project_id") != pid:
         raise HTTPException(404, "Клип не найден")
     src: Optional[Path] = None
-    start = float(clip.get("start") or 0.0)
-    end = float(clip.get("end") or 0.0)
+    win_start = float(clip.get("start") or 0.0)
+    win_end = float(clip.get("end") or 0.0)
+    src_dur = float(project.get("duration") or 0.0)
     if project.get("source") and Path(project["source"]).is_file():
         src = Path(project["source"])
+        if src_dur <= 0:
+            try:
+                src_dur = float(utils.media_duration(src) or 0.0)
+            except Exception:
+                src_dur = 0.0
+        if start is not None and math.isfinite(start):
+            win_start = max(0.0, float(start))
+        if end is not None and math.isfinite(end):
+            win_end = max(0.0, float(end))
+        if src_dur > 0:
+            win_start = min(win_start, max(0.0, src_dur - 0.5))
+            win_end = min(win_end, src_dur)
     elif clip.get("path") and Path(clip["path"]).is_file():
         src = Path(clip["path"])
-        dur = float(clip.get("duration") or max(1.0, end - start))
-        start, end = 0.0, dur
+        dur = float(clip.get("duration") or max(1.0, win_end - win_start))
+        win_start, win_end = 0.0, dur
     if not src:
         raise HTTPException(404, "Источник кадров недоступен")
+    if win_end <= win_start + 0.5:
+        win_end = win_start + 1.0
     workdir = PROJECTS_DIR / pid / "strips"
     workdir.mkdir(parents=True, exist_ok=True)
-    key = f"{cid}_{int(start * 10)}_{int(end * 10)}.jpg"
+    key = f"{cid}_{int(win_start * 10)}_{int(win_end * 10)}.jpg"
     out = workdir / key
     if not out.is_file() or out.stat().st_size < 1000:
         tmp = workdir / f".{key}.{os.urandom(2).hex()}.jpg"
         try:
-            render.make_filmstrip(src, tmp, start, end, frames=10, thumb_w=120, thumb_h=68)
+            render.make_filmstrip(src, tmp, win_start, win_end, frames=10, thumb_w=120, thumb_h=68)
             tmp.replace(out)
         except Exception as exc:  # noqa: BLE001
             tmp.unlink(missing_ok=True)
@@ -1239,8 +1328,14 @@ def project_zip(pid: str) -> FileResponse:
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+def index() -> HTMLResponse:
+    html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    meta = f'  <meta name="krlz-token" content="{_SESSION_TOKEN}" />\n'
+    if "</head>" in html:
+        html = html.replace("</head>", meta + "</head>", 1)
+    else:
+        html = meta + html
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 custom_fonts.CUSTOM_DIR.mkdir(parents=True, exist_ok=True)

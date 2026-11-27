@@ -42,6 +42,14 @@ jobs:
           $v = python tools/version.py
           "value=$v" >> $env:GITHUB_OUTPUT
 
+      - name: Frontend syntax check
+        shell: pwsh
+        run: node --check web/app.js web/studio2.js web/editor2.js
+
+      - name: Unit tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -t . -v
+
       - name: Build
         run: pyinstaller ViralCut.spec --noconfirm --clean
 

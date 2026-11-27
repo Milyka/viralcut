@@ -142,7 +142,7 @@ async function loadFontCatalog() {
 }
 
 function refreshFontSelects(selected, target) {
-  ["#fontSelect", "#tpFont", "#edFont"].forEach((sel) => {
+  ["#fontSelect", "#tpFont", "#edFont", "#edFontSel"].forEach((sel) => {
     const el = $(sel);
     if (!el) return;
     const value = (target && sel === target) ? selected : el.value;
@@ -156,7 +156,12 @@ async function uploadFont(file) {
   fd.append("file", file);
   let entry;
   try {
-    const res = await fetch("/api/fonts", { method: "POST", body: fd });
+    const tok = krlzToken();
+    const res = await fetch("/api/fonts", {
+      method: "POST",
+      headers: tok ? { "X-Krlz-Token": tok } : {},
+      body: fd,
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "Не удалось загрузить шрифт");
     entry = data;
@@ -284,10 +289,19 @@ const state = {
 
 /* ---------------- API ---------------- */
 
+function krlzToken() {
+  const meta = document.querySelector('meta[name="krlz-token"]');
+  return meta ? (meta.getAttribute("content") || "") : "";
+}
+
 async function api(path, options = {}) {
+  const headers = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
+  const tok = krlzToken();
+  if (tok) headers["X-Krlz-Token"] = tok;
+  if (options.headers) Object.assign(headers, options.headers);
   const res = await fetch(path, {
-    headers: options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
-    ...options
+    ...options,
+    headers,
   });
   if (!res.ok) {
     let msg = res.statusText;
@@ -656,6 +670,9 @@ async function loadAiStatus() {
   } catch (e) {
     state.ai = { configured: false };
   }
+  if (!state.opts.aiModeTouched) {
+    state.opts.aiMode = Boolean(state.ai && state.ai.configured);
+  }
   const hint = $("#aiModeHint");
   if (hint) hint.textContent = aiModeHint();
   return state.ai;
@@ -663,6 +680,8 @@ async function loadAiStatus() {
 
 function heroOptions() {
   const d = DUR_PRESETS[state.opts.dur] || DUR_PRESETS["20-45"];
+  const cutMode = state.opts.cutMode || "ai";
+  const useLlm = Boolean(state.opts.aiMode && cutMode !== "even");
   return {
     count: state.opts.count,
     min_dur: d.min,
@@ -670,9 +689,9 @@ function heroOptions() {
     target_dur: d.target,
     aspect: state.opts.aspect,
     mode: state.opts.mode,
-    cut_mode: state.opts.cutMode || "ai",
+    cut_mode: cutMode,
     ai_preset: state.opts.aiPreset || "best",
-    subtitles: state.opts.subtitles,
+    subtitles: cutMode === "even" ? false : state.opts.subtitles,
     accent: state.opts.accent,
     sub_font: state.opts.subFont,
     sub_size: state.opts.subSize,
@@ -686,9 +705,9 @@ function heroOptions() {
     cut_pauses: state.opts.cutPauses,
     language: state.opts.language || "auto",
     cookies_browser: state.opts.cookies,
-    ai_mode: Boolean(state.opts.aiMode),
+    ai_mode: useLlm,
     ai_prompt: state.opts.aiPrompt || "",
-    autostart: Boolean(state.opts.aiMode || state.opts.cutMode === "even")
+    autostart: Boolean(useLlm || cutMode === "even")
   };
 }
 
@@ -2400,6 +2419,7 @@ function openEditor(clipId) {
 }
 
 function closeModal() {
+  $$("#modal video").forEach((v) => { try { v.pause(); } catch (_) {} });
   resetModalState();
   $("#modal").classList.add("hidden");
   $("#modal").innerHTML = "";
@@ -3030,13 +3050,21 @@ async function applyAssistantUI(data) {
   }
   if (ui.ai_mode !== undefined) {
     state.opts.aiMode = Boolean(ui.ai_mode);
+    state.opts.aiModeTouched = true;
     if (ui.prompt) state.opts.aiPrompt = String(ui.prompt);
     const toggle = $("#aiModeToggle");
     if (toggle) toggle.checked = state.opts.aiMode;
+    const toggleV2 = $("#newAiModeToggle");
+    if (toggleV2) toggleV2.checked = state.opts.aiMode;
     const promptInput = $("#aiPrompt");
     if (promptInput && ui.prompt) promptInput.value = state.opts.aiPrompt;
+    const promptV2 = $("#newAiPrompt");
+    if (promptV2 && ui.prompt) promptV2.value = state.opts.aiPrompt;
     const card = $("#aiModeCard");
     if (card) card.classList.toggle("on", state.opts.aiMode);
+    if (!state.current && state.nav === "new") {
+      window.KRLZ2?.renderNavView?.(true);
+    }
   }
   if (ui.open_settings) {
     try { await openSettings(); } catch (e) { console.error(e); }

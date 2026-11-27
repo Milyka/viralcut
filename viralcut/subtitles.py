@@ -337,7 +337,8 @@ def _merge_short_cues(cues: List[List[Dict[str, Any]]], clip_len: float,
 
 
 def _pos_tag(position: str, offset: int, free_pos: Optional[List[float]] = None,
-             play_w: int = PLAY_W, play_h: int = PLAY_H) -> str:
+             play_w: int = PLAY_W, play_h: int = PLAY_H,
+             split_ratio: Optional[float] = None) -> str:
     """Возвращает override-тег положения. offset > 0 — выше/дальше от края."""
     if free_pos and len(free_pos) == 2:
         try:
@@ -354,6 +355,11 @@ def _pos_tag(position: str, offset: int, free_pos: Optional[List[float]] = None,
         return f"\\an8\\pos({cx},{y})"
     if position == "middle":
         y = max(int(round(play_h * 0.08)), min(int(round(play_h * 0.92)), play_h // 2 - scaled_offset))
+        return f"\\an5\\pos({cx},{y})"
+    if split_ratio is not None:
+        ratio = max(0.35, min(0.80, float(split_ratio)))
+        base_y = int(round(play_h * ratio))
+        y = max(int(round(play_h * 0.12)), min(int(round(play_h * 0.90)), base_y - scaled_offset))
         return f"\\an5\\pos({cx},{y})"
     base_y = int(round(play_h * (1580.0 / 1920.0)))
     y = max(int(round(play_h * 0.12)), min(int(round(play_h * 0.958)), base_y - scaled_offset))
@@ -464,7 +470,8 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
               animation: str = "pop",
               outline_enabled: bool = True,
               outline_width: int = 7,
-              outline_color: str = "#000000") -> str:
+              outline_color: str = "#000000",
+              split_ratio: Optional[float] = None) -> str:
     """Собирает ASS-файл для фрагмента. Тайминги слов абсолютные (от начала видео)."""
     play_w, play_h = ASPECT_RES.get(aspect, (PLAY_W, PLAY_H))
     font_scale = ASPECT_FONT_SCALE.get(aspect, 1.0)
@@ -505,7 +512,8 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
     )
     events: List[str] = []
     clip_len = max(0.1, clip_end - clip_start)
-    pos = _pos_tag(position, int(offset), free_pos, play_w=play_w, play_h=play_h)
+    pos = _pos_tag(position, int(offset), free_pos, play_w=play_w, play_h=play_h,
+                   split_ratio=split_ratio)
 
     local = []
     for w in words:

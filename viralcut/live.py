@@ -457,6 +457,8 @@ def _ad_overlap(start: float, end: float, intervals: List[Dict[str, Any]]) -> fl
 
 
 def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
+    from . import game_layer
+
     raw_mode = opts.get("mode") or "blur"
     mode = "blur" if raw_mode == "auto" else raw_mode
     return {
@@ -472,6 +474,11 @@ def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         "sub_offset": int(opts.get("sub_offset", 0)),
         "sub_free": opts.get("sub_free"),
         "sub_speed": opts.get("sub_speed", "calm"),
+        "sub_anim": opts.get("sub_anim", "pop"),
+        "sub_outline": bool(opts.get("sub_outline", True)),
+        "sub_outline_width": int(opts.get("sub_outline_width", 7)),
+        "sub_outline_color": opts.get("sub_outline_color", "#000000"),
+        "game_layer": game_layer.normalize_config(opts.get("game_layer")),
         "cut_pauses": bool(opts.get("cut_pauses")),
     }
 

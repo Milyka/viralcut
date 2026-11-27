@@ -150,14 +150,18 @@ _fallback_notice: Optional[Dict[str, str]] = None
 _last_fallback = 0.0
 
 
-def _hw_args(encoder: str, crf: int) -> List[str]:
+def _hw_args(encoder: str, crf: int, quality: str = "balanced") -> List[str]:
     """Аргументы аппаратного энкодера (у каждого свои понятия качества)."""
     if encoder == "h264_videotoolbox":
-        # q=75 по замеру даёт SSIM 0.9905 против 0.9894 у libx264 CRF19
-        return ["-c:v", encoder, "-q:v", "75", "-profile:v", "high",
+        qv = {"fast": "65", "high": "82"}.get(quality, "75")
+        return ["-c:v", encoder, "-q:v", qv, "-profile:v", "high",
                 "-pix_fmt", "yuv420p"]
     if encoder == "h264_nvenc":
-        return ["-c:v", encoder, "-preset", "p5", "-rc", "vbr", "-cq", str(max(19, crf)),
+        nv_preset, nv_cq = {
+            "fast": ("p3", "24"),
+            "high": ("p6", "17"),
+        }.get(quality, ("p5", "20"))
+        return ["-c:v", encoder, "-preset", nv_preset, "-rc", "vbr", "-cq", nv_cq,
                 "-b:v", "0", "-pix_fmt", "yuv420p"]
     if encoder == "h264_amf":
         # AMD: постоянное качество вместо битрейта, иначе сцены «плывут»
@@ -292,9 +296,9 @@ def _encode_attempts(
         yield None, None
 
 
-def _video_args(encoder: Optional[str], crf: int, preset: str) -> List[str]:
+def _video_args(encoder: Optional[str], crf: int, preset: str, quality: str = "balanced") -> List[str]:
     if encoder:
-        return _hw_args(encoder, crf)
+        return _hw_args(encoder, crf, quality=quality)
     return ["-c:v", "libx264", "-preset", preset, "-crf", str(crf),
             "-profile:v", "high", "-pix_fmt", "yuv420p"]
 
@@ -462,10 +466,11 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     top_h, bot_h = _gl.split_heights(h, game_cfg["split"]) if game_cfg else (h, 0)
 
     sharpen_base = info["width"] < w * 0.75
+    audio_only = not info.get("has_video", bool(info["width"] and info["height"]))
 
-    pip_cam = (pip or {}).get("cam") if pip and pip.get("enabled", True) and not game_cfg else None
+    pip_cam = (pip or {}).get("cam") if (pip and pip.get("enabled", True) and not game_cfg and not audio_only) else None
     corner = (pip or {}).get("cam_corner")
-    if pip_cam is None and corner and pip and pip.get("enabled", True) and not game_cfg:
+    if pip_cam is None and corner and pip and pip.get("enabled", True) and not game_cfg and not audio_only:
         share = float((pip or {}).get("cam_share", 0.3))
         side = max(64, int(round(min(info["width"], info["height"]) * share)))
         margin = int(round(min(info["width"], info["height"]) * 0.02))
@@ -475,14 +480,14 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     pip_size = int(round(min(w, h) * float((pip or {}).get("size", 0.28))))
     pip_size -= pip_size % 2
     pip_mask = None
-    if pip_cam and pip_size >= 64:
+    if not audio_only and pip_cam and pip_size >= 64:
         from . import pip as _pip
 
         pip_mask = _pip.ensure_mask(pip_size, int((pip or {}).get("radius", 20)))
 
     def _zoom_pan_crop(in_lbl: str, out_lbl: str, tw: int, th: int,
                        zoom: float, pan: List[float], sharp_flag: bool = False) -> str:
-        z = max(1.0, min(2.2, float(zoom or 1.0)))
+        z = max(1.0, min(2.5, float(zoom or 1.0)))
         px = max(0.0, min(1.0, 0.5 + float(pan[0]) * 0.5))
         py = max(0.0, min(1.0, 0.5 + float(pan[1]) * 0.5))
         sw = int(round(tw * z))
@@ -496,7 +501,6 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         )
 
     def _build_filters(path_used: Optional[Dict[str, Any]]) -> str:
-        audio_only = not info.get("has_video", bool(info["width"] and info["height"]))
         target_h = top_h if game_cfg else h
         if audio_only:
             parts = [f"color=c=#0f0e16:s={w}x{target_h}:r=30:d={duration:.3f}[base]"]
@@ -508,6 +512,15 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             if game_cfg and (game_cfg["top_zoom"] > 1.01 or game_cfg["top_pan"] != [0.0, 0.0]):
                 parts = [_zoom_pan_crop(src, "[base]", w, target_h,
                                         game_cfg["top_zoom"], game_cfg["top_pan"], sharp)]
+            elif game_cfg and mode != "blur":
+                # В Split-Screen заполняем верхний слой без размытых полос, сохраняя фокус по лицу.
+                fx = focus_x
+                if path_used and path_used.get("crop_w") and info["width"]:
+                    pts = path_used.get("points") or []
+                    if pts:
+                        avg_x = sum(float(p[1]) for p in pts) / len(pts)
+                        fx = max(0.0, min(1.0, (avg_x + float(path_used["crop_w"]) * 0.5) / info["width"]))
+                parts = [_crop_chain(w, target_h, fx, sharpen=sharp, src=src)]
             elif mode == "auto" and path_used and not game_cfg:
                 sharp = float(path_used.get("crop_w", info["width"])) < w * 1.15
                 parts = [_auto_chain(w, target_h, path_used, sharp, src)]
@@ -531,7 +544,11 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
                 _zoom_pan_crop(f"[{game_idx}:v]", "[_botv]", w, bot_h,
                                game_cfg["game_zoom"], game_cfg["game_pan"], False)
             )
-            parts.append("[_topv]setsar=1[_topn];[_botv]setsar=1[_botn];[_topn][_botn]vstack=inputs=2[base]")
+            parts.append(
+                "[_topv]fps=30,setsar=1,setpts=PTS-STARTPTS[_topn];"
+                "[_botv]fps=30,setsar=1,setpts=PTS-STARTPTS[_botn];"
+                "[_topn][_botn]vstack=inputs=2[base]"
+            )
 
         if ass_path is not None:
             fonts_dir = custom_fonts.libass_dir()
@@ -575,13 +592,22 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             built += ["-loop", "1", "-framerate", "30", "-i", str(pip_mask)]
         game_has_audio = False
         if game_cfg and game_path is not None:
-            built += ["-stream_loop", "-1", "-ss", f"{float(game_cfg.get('start') or 0.0):.2f}",
+            raw_game_start = float(game_cfg.get("start") or 0.0)
+            eff_game_start = raw_game_start
+            g_info: Dict[str, Any] = {}
+            try:
+                g_info = probe(game_path)
+                g_dur = float(g_info.get("duration") or 0.0)
+                if g_dur > 0.5:
+                    eff_game_start = raw_game_start % g_dur
+                else:
+                    eff_game_start = 0.0
+            except Exception:
+                eff_game_start = 0.0
+            built += ["-stream_loop", "-1", "-ss", f"{eff_game_start:.2f}",
                       "-t", f"{duration + 1.0:.3f}", "-i", str(game_path)]
             if game_cfg.get("audio"):
-                try:
-                    game_has_audio = bool(probe(game_path).get("has_audio"))
-                except Exception:
-                    game_has_audio = False
+                game_has_audio = bool(g_info.get("has_audio"))
         graph = filters
         audio_map = f"0:a:{max(0, int(audio_track))}?"
         use_graph_audio = False
@@ -618,8 +644,9 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
 
     encoder_mode = _encoder_mode()
     hw = hw_encoder(encoder_mode)
-    windows_gpu = sys.platform == "win32" and bool(hw)
-    attempts = _encode_attempts(hw, crop_path, windows_gpu)
+    try_other_gpu = sys.platform == "win32" and bool(hw)
+    notify_gpu_fallback = sys.platform == "win32" and encoder_mode == "gpu"
+    attempts = _encode_attempts(hw, crop_path, try_other_gpu)
     tried_cpu = False
     tail_text = ""
     stop_reason: Optional[str] = None
@@ -629,26 +656,26 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         staged = Path(scratch) / out_path.name
         for attempt, (encoder, path_used) in enumerate(attempts):
             if encoder is None and not tried_cpu:
-                if windows_gpu:
+                if notify_gpu_fallback:
                     _announce_cpu_fallback(hw)
                 elif hw:
                     print(f"[render] {hw} не сработал, повтор на libx264", file=sys.stderr, flush=True)
                 tried_cpu = True
             staged.unlink(missing_ok=True)
             filters = _build_filters(path_used if mode == "auto" else None)
-            cmd = _compose(_video_args(encoder, crf, preset), filters, staged)
+            cmd = _compose(_video_args(encoder, crf, preset, rq), filters, staged)
             if os.environ.get("VIRALCUT_DEBUG_RENDER"):
                 print("[render] cmd:", " ".join(cmd), file=sys.stderr, flush=True)
             code, tail, stop_reason = _run_encode(cmd, duration, on_progress if attempt == 0 else None)
             tail_text = "".join(tail)
-            if stop_reason and not (windows_gpu and encoder):
+            if stop_reason and not ((try_other_gpu or notify_gpu_fallback) and encoder):
                 break
             if not stop_reason and code == 0 and staged.is_file() and staged.stat().st_size >= 10000:
                 if on_progress:
                     on_progress(1.0)
                 staged.replace(out_path)
                 break
-            if encoder is not None and windows_gpu:
+            if encoder is not None and (try_other_gpu or notify_gpu_fallback):
                 detail = stop_reason or tail_text.strip() or f"код {code}, выходной MP4 неполный"
                 print(f"[render] {encoder}: {detail[-460:]}", file=sys.stderr, flush=True)
             elif encoder is None and path_used is not None:

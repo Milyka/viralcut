@@ -65,6 +65,7 @@
     bgmTracks: [],
     gameClips: [],
     botStatus: null,
+    editingKitId: "",
   };
 
   async function loadProAssetsData() {
@@ -1313,45 +1314,62 @@
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;padding-top:12px;border-top:1px solid var(--border)">
             <div style="display:flex;flex-direction:column;gap:10px">
               <b style="font-size:13px">Сохранённые Brand Kits (${ui.profiles.length})</b>
-              ${ui.profiles.length ? `<div style="display:flex;flex-direction:column">` + ui.profiles.map((k) => {
-                const isDef = conf.default_profile_id === k.id;
-                return `
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid var(--border)">
-                  <div style="min-width:0">
-                    <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.name)} ${isDef ? `<span class="status-pill done" style="font-size:10px;padding:1px 6px">По умолчанию</span>` : ""}</div>
-                    <div class="hint" style="font-size:11.5px">${esc(k.config?.aspect || "9:16")} · ${esc(k.config?.sub_font || "montserrat")}${k.config?.watermark?.enabled ? " · логотип" : ""}${k.config?.bgm?.enabled ? " · BGM" : ""}</div>
-                  </div>
-                  <div style="display:flex;gap:6px;flex:none">
-                    <button class="mini-chip ${isDef ? "active" : ""}" data-kit-default="${esc(k.id)}" data-kit-is-default="${isDef ? "1" : ""}" type="button" title="${isDef ? "Снять профиль по умолчанию" : "Использовать по умолчанию для бота"}">${isDef ? "Снять" : "По умолч."}</button>
-                    <button class="mini-chip" data-kit-update="${esc(k.id)}" type="button" title="Обновить из текущих настроек">Обновить</button>
-                    <button class="mini-chip" data-kit-del="${esc(k.id)}" type="button" style="color:#fca5a5">Удалить</button>
-                  </div>
-                </div>`;
-              }).join("") + `</div>` : `<div class="hint">Профилей пока нет — создайте профиль ниже из текущих настроек нового проекта.</div>`}
+              ${(() => {
+                const editKit = ui.editingKitId ? ui.profiles.find((p) => p.id === ui.editingKitId) : null;
+                if (ui.editingKitId && !editKit) ui.editingKitId = "";
+                const editWmId = editKit?.config?.watermark?.enabled ? (editKit.config.watermark.asset_id || "") : "";
+                const editWmPos = editKit?.config?.watermark?.position || "top-right";
+                const editIntroId = editKit?.config?.intro_asset_id || "";
+                const editOutroId = editKit?.config?.outro_asset_id || "";
+                const listHtml = ui.profiles.length ? `<div style="display:flex;flex-direction:column">` + ui.profiles.map((k) => {
+                  const isDef = conf.default_profile_id === k.id;
+                  const isEd = Boolean(editKit && editKit.id === k.id);
+                  return `
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid var(--border)">
+                    <div style="min-width:0">
+                      <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(k.name)} ${isDef ? `<span class="status-pill done" style="font-size:10px;padding:1px 6px">По умолчанию</span>` : ""}</div>
+                      <div class="hint" style="font-size:11.5px">${esc(k.config?.aspect || "9:16")} · ${esc(k.config?.sub_font || "montserrat")}${k.config?.watermark?.enabled ? " · логотип" : ""}${k.config?.intro_asset_id ? " · интро" : ""}${k.config?.outro_asset_id ? " · аутро" : ""}${k.config?.bgm?.enabled ? " · BGM" : ""}</div>
+                    </div>
+                    <div style="display:flex;gap:6px;flex:none">
+                      <button class="mini-chip ${isDef ? "active" : ""}" data-kit-default="${esc(k.id)}" data-kit-is-default="${isDef ? "1" : ""}" type="button" title="${isDef ? "Снять профиль по умолчанию" : "Использовать по умолчанию для бота"}">${isDef ? "Снять" : "По умолч."}</button>
+                      <button class="mini-chip ${isEd ? "active" : ""}" data-kit-edit="${esc(k.id)}" type="button" title="Изменить название, логотип, интро/аутро или настройки">${isEd ? "Редактируется" : "Изменить"}</button>
+                      <button class="mini-chip" data-kit-del="${esc(k.id)}" type="button" style="color:#fca5a5">Удалить</button>
+                    </div>
+                  </div>`;
+                }).join("") + `</div>` : `<div class="hint">Профилей пока нет — создайте профиль ниже из текущих настроек нового проекта.</div>`;
+                return `${listHtml}
               <div style="display:flex;flex-direction:column;gap:8px;padding-top:10px;border-top:1px solid var(--border)">
-                <input id="kitNewName" type="text" placeholder="Название Brand Kit (например: Подкаст-канал)" style="height:36px;padding:0 11px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:13px" />
+                ${editKit ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+                  <span style="font-size:12px;font-weight:600;color:var(--text)">Редактирование: ${esc(editKit.name)}</span>
+                  <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer"><input type="checkbox" id="kitSyncOpts" /> Подтянуть настройки «Нового проекта»</label>
+                </div>` : ""}
+                <input id="kitNewName" type="text" value="${esc(editKit ? editKit.name : "")}" placeholder="Название Brand Kit (например: Подкаст-канал)" style="height:36px;padding:0 11px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:13px" />
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
                   <select id="kitWmSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
-                    <option value="">Водяной знак: нет</option>
-                    ${ui.brandAssets.filter((a) => a.kind === "watermark").map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}
+                    <option value="" ${!editWmId ? "selected" : ""}>Водяной знак: нет</option>
+                    ${ui.brandAssets.filter((a) => a.kind === "watermark").map((a) => `<option value="${esc(a.id)}" ${editWmId === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
                   </select>
                   <select id="kitWmPos" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
-                    <option value="top-right">Угол: сверху справа</option>
-                    <option value="top-left">Угол: сверху слева</option>
-                    <option value="bottom-right">Угол: снизу справа</option>
-                    <option value="bottom-left">Угол: снизу слева</option>
+                    <option value="top-right" ${editWmPos === "top-right" ? "selected" : ""}>Угол: сверху справа</option>
+                    <option value="top-left" ${editWmPos === "top-left" ? "selected" : ""}>Угол: сверху слева</option>
+                    <option value="bottom-right" ${editWmPos === "bottom-right" ? "selected" : ""}>Угол: снизу справа</option>
+                    <option value="bottom-left" ${editWmPos === "bottom-left" ? "selected" : ""}>Угол: снизу слева</option>
                   </select>
                   <select id="kitIntroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
-                    <option value="">Интро: нет</option>
-                    ${ui.brandAssets.filter((a) => a.kind === "intro" || a.kind === "outro").map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${a.duration} с)</option>`).join("")}
+                    <option value="" ${!editIntroId ? "selected" : ""}>Интро: нет</option>
+                    ${ui.brandAssets.filter((a) => a.kind === "intro" || a.kind === "outro").map((a) => `<option value="${esc(a.id)}" ${editIntroId === a.id ? "selected" : ""}>${esc(a.name)} (${a.duration} с)</option>`).join("")}
                   </select>
                   <select id="kitOutroSel" style="height:34px;padding:0 8px;border-radius:8px;background:var(--surface-2);border:1px solid var(--border);font-size:12px">
-                    <option value="">Аутро: нет</option>
-                    ${ui.brandAssets.filter((a) => a.kind === "outro" || a.kind === "intro").map((a) => `<option value="${esc(a.id)}">${esc(a.name)} (${a.duration} с)</option>`).join("")}
+                    <option value="" ${!editOutroId ? "selected" : ""}>Аутро: нет</option>
+                    ${ui.brandAssets.filter((a) => a.kind === "outro" || a.kind === "intro").map((a) => `<option value="${esc(a.id)}" ${editOutroId === a.id ? "selected" : ""}>${esc(a.name)} (${a.duration} с)</option>`).join("")}
                   </select>
                 </div>
-                <button class="btn-primary" id="kitCreateBtn" type="button" style="height:36px">Сохранить Brand Kit</button>
-              </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn-primary" id="kitCreateBtn" type="button" style="flex:1;height:36px">${editKit ? "Сохранить изменения" : "Сохранить Brand Kit"}</button>
+                  ${editKit ? `<button class="btn-ghost" id="kitCancelEditBtn" type="button" style="height:36px">Отмена</button>` : ""}
+                </div>
+              </div>`;
+              })()}
             </div>
 
             <div style="display:flex;flex-direction:column;gap:10px">
@@ -1593,17 +1611,46 @@
     $("#kitCreateBtn")?.addEventListener("click", async () => {
       const name = ($("#kitNewName")?.value || "").trim();
       if (!name) { toast("Введите название профиля", "err"); return; }
-      const cfg = currentOptsAsKitConfig();
+      const editKit = ui.editingKitId ? ui.profiles.find((p) => p.id === ui.editingKitId) : null;
       const wmId = $("#kitWmSel")?.value || "";
-      cfg.watermark = wmId ? { enabled: true, asset_id: wmId, position: $("#kitWmPos")?.value || "top-right", scale: 0.16, opacity: 0.85, margin: 36 } : null;
-      cfg.intro_asset_id = $("#kitIntroSel")?.value || "";
-      cfg.outro_asset_id = $("#kitOutroSel")?.value || "";
+      const wmPos = $("#kitWmPos")?.value || "top-right";
+      const introId = $("#kitIntroSel")?.value || "";
+      const outroId = $("#kitOutroSel")?.value || "";
+      if (editKit) {
+        const cfg = $("#kitSyncOpts")?.checked ? currentOptsAsKitConfig() : { ...(editKit.config || {}) };
+        const prevWm = editKit.config?.watermark || {};
+        cfg.watermark = wmId
+          ? { enabled: true, asset_id: wmId, position: wmPos, scale: prevWm.scale ?? 0.16, opacity: prevWm.opacity ?? 0.85, margin: prevWm.margin ?? 36 }
+          : null;
+        cfg.intro_asset_id = introId;
+        cfg.outro_asset_id = outroId;
+        try {
+          const updated = await api(`/api/profiles/${encodeURIComponent(editKit.id)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name, config: cfg }),
+          });
+          ui.editingKitId = "";
+          if (state.opts.profileId === editKit.id && updated) applyBrandKitToOpts(updated);
+          toast(`Brand Kit «${name}» обновлён`);
+          await loadSettingsViewData();
+          renderNavView(true);
+        } catch (err) { toast(err.message, "err"); }
+        return;
+      }
+      const cfg = currentOptsAsKitConfig();
+      cfg.watermark = wmId ? { enabled: true, asset_id: wmId, position: wmPos, scale: 0.16, opacity: 0.85, margin: 36 } : null;
+      cfg.intro_asset_id = introId;
+      cfg.outro_asset_id = outroId;
       try {
         await api("/api/profiles", { method: "POST", body: JSON.stringify({ name, config: cfg }) });
         toast(`Brand Kit «${name}» сохранён`);
         await loadSettingsViewData();
         renderNavView(true);
       } catch (err) { toast(err.message, "err"); }
+    });
+    $("#kitCancelEditBtn")?.addEventListener("click", () => {
+      ui.editingKitId = "";
+      renderNavView(true);
     });
     $$("[data-kit-default]").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -1616,35 +1663,21 @@
         } catch (err) { toast(err.message, "err"); }
       });
     });
-    $$("[data-kit-update]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const kid = btn.dataset.kitUpdate;
-        const existing = ui.profiles.find((p) => p.id === kid);
-        if (!existing) return;
-        const cfg = currentOptsAsKitConfig();
-        const wmId = $("#kitWmSel")?.value || "";
-        if (wmId) {
-          cfg.watermark = { enabled: true, asset_id: wmId, position: $("#kitWmPos")?.value || "top-right", scale: 0.16, opacity: 0.85, margin: 36 };
-        } else if (existing.config?.watermark) {
-          cfg.watermark = existing.config.watermark;
-        }
-        const introVal = $("#kitIntroSel")?.value || "";
-        const outroVal = $("#kitOutroSel")?.value || "";
-        cfg.intro_asset_id = introVal || existing.config?.intro_asset_id || "";
-        cfg.outro_asset_id = outroVal || existing.config?.outro_asset_id || "";
-        try {
-          await api(`/api/profiles/${encodeURIComponent(kid)}`, { method: "PATCH", body: JSON.stringify({ config: cfg }) });
-          toast(`Brand Kit «${existing.name}» обновлён`);
-          await loadSettingsViewData();
-          renderNavView(true);
-        } catch (err) { toast(err.message, "err"); }
+    $$("[data-kit-edit]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const kid = btn.dataset.kitEdit || "";
+        ui.editingKitId = ui.editingKitId === kid ? "" : kid;
+        renderNavView(true);
+        if (ui.editingKitId) $("#kitNewName")?.focus();
       });
     });
     $$("[data-kit-del]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         if (!confirm("Удалить этот Brand Kit?")) return;
+        const kid = btn.dataset.kitDel;
         try {
-          await api(`/api/profiles/${btn.dataset.kitDel}`, { method: "DELETE" });
+          await api(`/api/profiles/${encodeURIComponent(kid)}`, { method: "DELETE" });
+          if (ui.editingKitId === kid) ui.editingKitId = "";
           toast("Brand Kit удалён");
           await loadSettingsViewData();
           renderNavView(true);
